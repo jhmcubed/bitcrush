@@ -1,0 +1,4 @@
+# The game's solid textures: in these a texel of 0 is drawn black by the CPU renderer; in the rest it leaves a hole.
+# Read from the game by the developer build's probe (src/test/.../SolidProbe.java), which logs the line
+# "solid texture ids (N textures): ..." and says when a game update makes this list differ. TextureManager reads it.
+# (empty until the first reading)

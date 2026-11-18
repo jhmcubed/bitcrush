@@ -128,6 +128,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private static final int MARK_TILE = 0x100000;
 	// the CPU look's integer camera maths stays inside an int out to here (claude/cpu-look.md)
 	static final int MAX_DISTANCE = 128;
+	// fog, as the GPU plugin's (11/18/2026): up to this many tiles in from the draw distance's edge
+	static final int MAX_FOG_DEPTH = 100;
 	static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2; // offset for sxy -> msxy
 	private static final int GROUND_MIN_Y = 350; // how far below the ground models extend
 
@@ -231,6 +233,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int glTinyComputeProgram = -1;
 	private int glSetupProgram = -1;
 	private int glSetupWriteProgram = -1;
+	// the fog's uniform locations (fogDepth, drawDistance, expandedChunks, fogColor), in the geometry stage's program
+	// and the record path's; this frame's fog depth and Extended map loading, read once in the frame's drawing
+	private final int[] uniFog = new int[4], uniRecFog = new int[4];
+	private int fogDepth, fogChunks;
 	private int glScanProgram = -1;
 	private int glRecordProgram = -1;
 	private int vaoRecords = -1;
@@ -834,6 +840,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private void initUniforms()
 	{
 		uniViewSize = GL43C.glGetUniformLocation(glProgram, "viewSize");
+		uniFog[0] = GL43C.glGetUniformLocation(glProgram, "fogDepth");
+		uniFog[1] = GL43C.glGetUniformLocation(glProgram, "drawDistance");
+		uniFog[2] = GL43C.glGetUniformLocation(glProgram, "expandedChunks");
+		uniFog[3] = GL43C.glGetUniformLocation(glProgram, "fogColor");
 		uniCpuFlags = GL43C.glGetUniformLocation(glProgram, "cpuFlags");
 		uniGroundPass = GL43C.glGetUniformLocation(glProgram, "groundPass");
 		uniAlphaPass = GL43C.glGetUniformLocation(glProgram, "alphaPass");
@@ -877,6 +887,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			uniScanBlockCount = GL43C.glGetUniformLocation(glScanProgram, "blockCount");
 			uniScanCapacity = GL43C.glGetUniformLocation(glScanProgram, "capacity");
 			uniRecViewSize = GL43C.glGetUniformLocation(glRecordProgram, "viewSize");
+			uniRecFog[0] = GL43C.glGetUniformLocation(glRecordProgram, "fogDepth");
+			uniRecFog[1] = GL43C.glGetUniformLocation(glRecordProgram, "drawDistance");
+			uniRecFog[2] = GL43C.glGetUniformLocation(glRecordProgram, "expandedChunks");
+			uniRecFog[3] = GL43C.glGetUniformLocation(glRecordProgram, "fogColor");
 			uniRecListB = GL43C.glGetUniformLocation(glRecordProgram, "listB");
 			uniRecCpuFlags = GL43C.glGetUniformLocation(glRecordProgram, "cpuFlags");
 			uniRecGroundPass = GL43C.glGetUniformLocation(glRecordProgram, "groundPass");
@@ -2201,6 +2215,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				&& !ground && !plainTriangles && !orderTest && targetBufferOffset / 3 <= MAX_RECORD_FACES;
 			GL43C.glUseProgram(glProgram);
 			GL43C.glUniform2i(uniViewSize, viewportWidth, viewportHeight);
+			fogDepth = Math.max(0, Math.min(MAX_FOG_DEPTH, config.fogDepth()));
+			fogChunks = config.expandedMapLoadingChunks();
+			setFog(uniFog, sky);
 			GL43C.glUniform1i(uniCpuFlags, cpuFlags);
 			GL43C.glUniform1i(uniGroundPass, 0);
 			GL43C.glUniform1i(uniAlphaPass, 0);
@@ -3105,6 +3122,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUseProgram(glRecordProgram);
 		GL43C.glUniformBlockBinding(glRecordProgram, uniRecBlock, 0);
 		GL43C.glUniform2i(uniRecViewSize, viewportWidth, viewportHeight);
+		setFog(uniRecFog, client.getSkyboxColor());
 		GL43C.glUniform1i(uniRecCpuFlags, cpuFlags);
 		GL43C.glUniform1i(uniRecGroundPass, 0);
 		GL43C.glUniform1f(uniRecGroundAllowance, config.groundAllowance());
@@ -3261,6 +3279,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		int size = data.remaining() << 2;
 		updateBuffer(glBuffer, target, size, usage, clFlags);
 		GL43C.glBufferSubData(target, 0, data);
+	}
+
+	// the fog's uniforms for the program in use (its locations: fog depth, draw distance, Extended map loading, colour)
+	private void setFog(int[] at, int sky)
+	{
+		GL43C.glUniform1i(at[0], fogDepth);
+		GL43C.glUniform1i(at[1], getDrawDistance());
+		GL43C.glUniform1i(at[2], fogChunks);
+		GL43C.glUniform3f(at[3], (sky >> 16 & 0xFF) / 255f, (sky >> 8 & 0xFF) / 255f, (sky & 0xFF) / 255f);
 	}
 
 	// a buffer only the card writes: bound, and grown when too small, never invalidated

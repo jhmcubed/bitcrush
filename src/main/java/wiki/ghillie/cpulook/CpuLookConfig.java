@@ -31,6 +31,7 @@ import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 import static wiki.ghillie.cpulook.CpuLookPlugin.MAX_DISTANCE;
+import static wiki.ghillie.cpulook.CpuLookPlugin.MAX_FOG_DEPTH;
 import wiki.ghillie.cpulook.config.UIScalingMode;
 
 @ConfigGroup(CpuLookConfig.GROUP)
@@ -242,6 +243,20 @@ public interface CpuLookConfig extends Config
 	{
 		return 50;
 	}
+	@Range(
+		max = MAX_FOG_DEPTH
+	)
+	@ConfigItem(
+		keyName = "fogDepth",
+		name = "Fog depth",
+		description = "How many tiles in from the edge of the draw distance the fog reaches, as the GPU plugin's fog does: the far edge fades into the sky instead of stopping. 0: no fog, the hard edge the CPU renderer has.",
+		position = 10
+	)
+	default int fogDepth()
+	{
+		return 0;
+	}
+
 
 	@ConfigItem(
 		keyName = "hideUnrelatedMaps",

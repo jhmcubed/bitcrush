@@ -61,6 +61,13 @@ uniform int tick;
 // in the order show. The solid pass keeps each pixel's winner's place in the order (Winner, + 1); the see-through pass
 // (seeThroughPass) drops a pixel of a face that came before it.
 uniform int seeThroughPass;
+
+// fog (11/18/2026, Jace: "I like my max draw distance being softened by fog rather than a hard cut"): the GPU plugin's,
+// not the CPU's (which has none); 0 tiles is off, the CPU renderer's hard edge
+uniform int fogDepth;        // in tiles
+uniform int drawDistance;    // in tiles
+uniform int expandedChunks;  // Extended map loading
+uniform vec3 fogColor;       // the sky's
 uniform isampler2D winners;
 
 #ifdef RECORDS
@@ -110,6 +117,36 @@ ivec2 uvAt(int U, int V, int W) {
   int w = W >> 14;
   if (w == 0) return ivec2(0);
   return ivec2(clamp(idiv(U, w), 0, 16256), idiv(V, w));
+}
+
+// How much fog a pixel takes: RuneLite 1.11.26's GPU plugin's fog (its vert.glsl: how far a point is from the edge of
+// the drawn square, the camera's square clipped to the loaded scene, its corners rounded off; full fog at the edge,
+// none fogDepth tiles in), worked out for the pixel's own point in the world instead of at each corner: its depth from
+// the CPU's depth key (the key's formula turned round, the face's bias put back), its place across from the screen and
+// that depth, then the camera's turn undone (cpu_turn.glsl's, backwards) and the camera's place added.
+float fogAmount(int px, int py) {
+  float key = fKey.x + fKey.z * float(py - int(fKey.w)) + fKey.y * float(px);
+  if (!(key > 1.0100503)) {
+    return 1.0;  // as far as the key reaches
+  }
+  float z = 150.75377 / ((key - 1.0100503) * 1.0100503) + 75.0 + 2.0 * float(fT2.w);
+  float xc = (float(px) - float(centerX)) * z / float(zoom);
+  float yc = (float(py) - float(centerY)) * z / float(zoom);
+  float sy = cameraRotF.x, cy = cameraRotF.y, sp = cameraRotF.z, cp = cameraRotF.w;
+  float z1 = cp * z - sp * yc;
+  float east = cy * xc - sy * z1 + float(cameraPos.x);
+  float north = sy * xc + cy * z1 + float(cameraPos.z);
+  const float TILE = 128.0, ROUND = 1.5, ROUND2 = ROUND * ROUND;
+  float edgeMin = (-float(expandedChunks) * 8.0 + 1.0) * TILE;
+  float edgeMax = (104.0 + float(expandedChunks) * 8.0 - 1.0) * TILE;
+  float reach = float(drawDistance) * TILE;
+  // (the client draws one less tile to the north and east than to the south and west)
+  float west = max(edgeMin, float(cameraPos.x) - reach), eastEdge = min(edgeMax, float(cameraPos.x) + reach - TILE);
+  float south = max(edgeMin, float(cameraPos.z) - reach), northEdge = min(edgeMax, float(cameraPos.z) + reach - TILE);
+  float xd = min(east - west, eastEdge - east), zd = min(north - south, northEdge - north);
+  float nearest = min(xd, zd), second = max(xd, zd);
+  float d = nearest - ROUND * TILE * max(0.0, (nearest + ROUND2) / (second + ROUND2));
+  return 1.0 - clamp(d / (float(fogDepth) * TILE), 0.0, 1.0);
 }
 
 void main() {
@@ -215,6 +252,9 @@ void main() {
     // in magenta: which faces the CPU's depth key lifts toward the camera, and by how much (twice the bias, in units)
     int b = fT2.w;
     rgb = b == 0 ? rgb * 0.3 : b <= 12 ? vec3(0.35 + 0.65 * float(b) / 12.0, 0.0, 0.0) : vec3(1.0, 0.0, 1.0);
+  }
+  if (fogDepth > 0) {
+    rgb = mix(rgb, fogColor, fogAmount(px, py));
   }
   FragColor = vec4(rgb, 1.0 - float(fT2.y) / 255.0);
   Winner = fFace + 1;

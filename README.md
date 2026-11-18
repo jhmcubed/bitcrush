@@ -19,8 +19,9 @@ distance and frame rate.
 - **The CPU's depth test**: what's in front decided by the CPU renderer's own rule.
 - **Solid textures**: the textures the game marks solid keep their black pixels instead of showing holes.
 
-**Like the GPU plugin**: Draw distance (up to 128 tiles), Hide unrelated maps, Extended map loading, UI scaling mode,
-Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove vertex snapping.
+**Like the GPU plugin**: Draw distance (up to 128 tiles), Fog depth (off by default: the CPU renderer stops in a hard
+edge; with fog, the far edge fades into the sky as the GPU plugin's does), Hide unrelated maps, Extended map loading,
+UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove vertex snapping.
 
 **Diagnostics**:
 

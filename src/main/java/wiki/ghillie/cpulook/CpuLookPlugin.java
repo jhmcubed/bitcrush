@@ -66,6 +66,7 @@ import net.runelite.api.TextureProvider;
 import net.runelite.api.Tile;
 import net.runelite.api.TileItem;
 import net.runelite.api.TileObject;
+import net.runelite.api.WorldView;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.hooks.DrawCallbacks;
@@ -365,6 +366,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// the same order, worked out faster (stage B's step 1, claude/cpu-look-stage-b.md); every 30th frame checked
 	// against cpuOrder, entry for entry
 	private final FastOrder fastOrder = new FastOrder();
+	// the developer build's log of world views (Sailing's boats; WorldViewLog.java)
+	private final WorldViewLog worldViewLog = new WorldViewLog();
 	private int orderChecks;
 	private boolean orderDiffWarned;
 	private Object[] drawKeys = new Object[4096];
@@ -1654,6 +1657,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		camXi = camX;
 		camYi = camY;
 		camZi = camZ;
+		if (Build.DEVELOPER)
+		{
+			worldViewLog.frame(client, camX, camY, camZ, yaw, pitch);
+		}
 		this.cameraX = camX;
 		this.cameraY = camY;
 		this.cameraZ = camZ;
@@ -1940,6 +1947,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawScenePaint(Scene scene, SceneTilePaint paint, int plane, int tileX, int tileY)
 	{
+		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
+		{
+			worldViewLog.paint(scene);
+		}
 		final long t0 = timing ? System.nanoTime() : 0;
 		drawScenePaint0(scene, paint, plane, tileX, tileY);
 		if (timing)
@@ -1996,6 +2007,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawSceneTileModel(Scene scene, SceneTileModel model, int tileX, int tileY)
 	{
+		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
+		{
+			worldViewLog.tileModel(scene);
+		}
 		final long t0 = timing ? System.nanoTime() : 0;
 		drawSceneTileModel0(scene, model, tileX, tileY);
 		if (timing)
@@ -2653,6 +2668,24 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	}
 
 	@Override
+	public void loadScene(WorldView worldView, Scene scene)
+	{
+		if (Build.DEVELOPER)
+		{
+			worldViewLog.loaded(worldView, scene);
+		}
+	}
+
+	@Override
+	public void despawnWorldView(WorldView worldView)
+	{
+		if (Build.DEVELOPER)
+		{
+			worldViewLog.despawned(worldView);
+		}
+	}
+
+	@Override
 	public void swapScene(Scene scene)
 	{
 		if (computeMode == ComputeMode.NONE)
@@ -2796,6 +2829,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void draw(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash)
 	{
+		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
+		{
+			worldViewLog.draw(scene, projection, x, y, z);
+		}
 		final long t0 = timing ? System.nanoTime() : 0;
 		final int before = targetBufferOffset;
 		drawnSeeThrough = false;

@@ -2829,9 +2829,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void draw(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash)
 	{
-		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
+		if (Build.DEVELOPER)
 		{
-			worldViewLog.draw(scene, projection, x, y, z);
+			worldViewLog.draw(scene, projection, renderable, x, y, z);
 		}
 		final long t0 = timing ? System.nanoTime() : 0;
 		final int before = targetBufferOffset;

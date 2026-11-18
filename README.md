@@ -36,6 +36,8 @@ UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove ver
 - Bitcrush replaces the GPU plugin and 117 HD while it's on; only one renderer can run at a time.
 - The CPU renderer itself only draws 25 tiles out. Past that, Bitcrush carries the same look on to your draw distance.
 - Textures added in later game updates count as not solid until Bitcrush's list of solid textures is updated.
+- Sailing's boats aren't drawn yet. RuneLite's older way of handing a renderer the scene, which Bitcrush is built on,
+  never passes a boat on to a plugin, so boats (and whoever is on them) are invisible, as they are with GPU (legacy).
 
 ## Credits
 

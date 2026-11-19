@@ -23,6 +23,17 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include fdiv_config
+
+#ifdef FDIV_FMA
+// a - q * b exactly, on a card whose fma() rounds once (11/19/2026: CpuLookPlugin asks the card at start, FmaProbe):
+// a - q b is a float wherever it's relied on (below), so the fused multiply-add's single rounding leaves it exact; one
+// step where Dekker's product takes fifteen, each waiting on the last
+float fdiv_gap(float a, float q, float b) {
+  precise float g = fma(-q, b, a);
+  return g;
+}
+#else
 // a - q * b, worked out exactly with float multiplies and adds alone (Dekker's product: q and b each split into two
 // halves of 12 bits, whose products a float holds exactly), exact whenever the answer is itself a float, as it is for
 // the two floats either side of a / b. No fused multiply-add: not every card fuses one (Mesa's llvmpipe doesn't), and
@@ -39,6 +50,7 @@ float fdiv_gap(float a, float q, float b) {
   precise float g = (a - p) - err;
   return g;
 }
+#endif
 
 // Java's float division, correctly rounded, in floats (11/18/2026; until then through doubles, exact but slow: a
 // consumer card runs doubles at a small fraction of its speed, and the geometry stage divides about 13 times a

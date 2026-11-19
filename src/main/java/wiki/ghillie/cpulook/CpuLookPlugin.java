@@ -263,6 +263,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int glTinyComputeProgram = -1;
 	// faces that surely draw nothing not written by the compute pass, only marked (priority_render.glsl's SKIP_EMPTY)
 	private boolean skipEmpty;
+	// whether the card's fma() rounds once (FmaProbe), asked once: the exact division's short form (fdiv.glsl)
+	private boolean fdivFma, fmaAsked;
 	// the developer's experiments on the record write (Diagnostics -> Records: the write's experiment)
 	private CpuLookConfig.RecordWrite recordWrite = CpuLookConfig.RecordWrite.NORMAL;
 
@@ -1032,6 +1034,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				return writeConfig(recordWrite);
 			}
+			if ("fdiv_config".equals(key))
+			{
+				return fdivFma ? "#define FDIV_FMA\n" : "";
+			}
 			return null;
 		});
 		template.addInclude(CpuLookPlugin.class);
@@ -1042,6 +1048,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		skipEmpty = !Build.DEVELOPER || config.skipEmpty();
 		recordWrite = Build.DEVELOPER ? config.recordWrite() : CpuLookConfig.RecordWrite.NORMAL;
+		if (computeMode == ComputeMode.OPENGL && !fmaAsked)
+		{
+			// (once: whether the card's fma() rounds once, for the short exact division; fdiv.glsl)
+			fmaAsked = true;
+			fdivFma = FmaProbe.fused();
+			log.info("Bitcrush: the card's fma() {}", fdivFma ? "rounds once: the short exact division" : "doesn't round once (or couldn't be asked): the long exact division");
+		}
 		Template template = createTemplate(-1, -1);
 		glProgram = PROGRAM.compile(template);
 		glUiProgram = UI_PROGRAM.compile(template);

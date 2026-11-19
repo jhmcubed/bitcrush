@@ -290,6 +290,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "zoneIdle",
+		name = "Zone mode: draw nothing",
+		description = "A measurement: in zone mode, CPU Look does none of its own work (no walk, no copying, no scene: only the interface is drawn), so Log frame timings shows what the client's zone mode itself costs a frame.",
+		position = 46,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean zoneIdle()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

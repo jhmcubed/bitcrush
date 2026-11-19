@@ -415,9 +415,9 @@ class FrameTimer
 			walk / n / 1e6, callbacks / n / 1e6, draws / n,
 			post / n / 1e6, drawing / n / 1e6, upload / n / 1e6, sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
 			triangles / n,
-			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below) and its copying of the "
-				+ "moving models the client hands over %.2f (%.0f models), so the client's own %.2f",
-				zoneCopyNs / n / 1e6, zoneCopies / n, (walk - zoneCopyNs - (orderFrames > 0 ? orderNs * n / orderFrames : 0)) / n / 1e6) : "")
+			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below), and its copying of the "
+				+ "moving models the client hands over %.2f (%.0f models; on the client's render threads, one at a time, so partly "
+				+ "beside the client's own work)", zoneCopyNs / n / 1e6, zoneCopies / n) : "")
 			+ (orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
 				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene %.2f, which tiles are in view %.2f, the sweep "
 				+ "%.2f), checked against the reference walk in %d frames, %d differing", orderNs / (double) orderFrames / 1e6,

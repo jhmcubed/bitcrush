@@ -452,6 +452,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// drawScene's plane: the highest render level the client draws this frame
 	private int framePlane;
 	private volatile boolean zoneFrame;
+	// the "Zone mode: draw nothing" measurement, read once a frame
+	private volatile boolean zoneIdle;
 	// drawDynamic comes from the client's render threads, drawTemp from its own thread beside them: their copying one
 	// at a time
 	private final Object zoneLock = new Object();
@@ -1755,6 +1757,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		this.cameraYawUnits = yaw;
 		this.cameraPitchUnits = pitch;
 		zoneFrame = zoneMode;
+		zoneIdle = zoneMode && Build.DEVELOPER && config.zoneIdle();
 		frameYawSin = (float) Math.sin(cameraYaw);
 		frameYawCos = (float) Math.cos(cameraYaw);
 		framePitchSin = (float) Math.sin(cameraPitch);
@@ -2846,43 +2849,44 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	public void drawDynamic(int renderThreadId, Projection worldProjection, Scene scene, TileObject tileObject, Renderable r,
 		Model m, int orient, int x, int y, int z)
 	{
-		if (!zoneFrame || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
 			|| !renderCallbackManager.drawObject(scene, tileObject))
 		{
 			return;
 		}
-		final long t0 = timing ? System.nanoTime() : 0;
 		synchronized (zoneLock)
 		{
+			// (timed inside the lock: the copying itself, not the wait for another render thread's)
+			final long t0 = timing ? System.nanoTime() : 0;
 			zoneDyn.put(r, zoneUpload(scene, r, m, orient, x, y, z, tileObject.getHash()));
-		}
-		if (timing)
-		{
-			timer.zoneCopy(System.nanoTime() - t0);
+			if (timing)
+			{
+				timer.zoneCopy(System.nanoTime() - t0);
+			}
 		}
 	}
 
 	@Override
 	public void drawTemp(Projection worldProjection, Scene scene, GameObject gameObject, Model m, int orient, int x, int y, int z)
 	{
-		if (!zoneFrame || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
 			|| !renderCallbackManager.drawObject(scene, gameObject))
 		{
 			return;
 		}
-		final long t0 = timing ? System.nanoTime() : 0;
 		synchronized (zoneLock)
 		{
+			final long t0 = timing ? System.nanoTime() : 0;
 			if (temps == tempG.length)
 			{
 				tempG = Arrays.copyOf(tempG, temps * 2);
 			}
 			tempG[temps++] = gameObject;
 			zoneTemp.put(gameObject, zoneUpload(scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash()));
-		}
-		if (timing)
-		{
-			timer.zoneCopy(System.nanoTime() - t0);
+			if (timing)
+			{
+				timer.zoneCopy(System.nanoTime() - t0);
+			}
 		}
 	}
 
@@ -2971,7 +2975,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		try
 		{
-			zoneDraw(scene);
+			if (!zoneIdle)
+			{
+				zoneDraw(scene);
+			}
 		}
 		catch (RuntimeException ex)
 		{

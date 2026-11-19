@@ -224,6 +224,82 @@ void insert_face(uint localId, modelinfo minfo, int adjPrio, int distance, int p
 
 #include "hillskew.glsl"
 
+#ifdef SKIP_EMPTY
+uniform ivec2 viewSize;
+
+// A corner's screen point by the card's own division (not the setup's exact one, fdiv.glsl), and how far it may be
+// from the exact one: the card's quotient is within a few rounding steps of the true one (GLSL allows 2.5), here
+// allowed a hundred, and the sum's rounding on top.
+vec2 roughScreen(vec3 k, out float margin) {
+  precise float px = k.x * float(zoom);
+  precise float py = k.y * float(zoom);
+  float qx = px / k.z;
+  float qy = py / k.z;
+#ifdef ROUGH_SKEW
+  // ShaderCheck only: a card whose division is this far off (ROUGH_SKEW times the quotient), to show the margin
+  // covers it; and with ROUGH_NO_MARGIN, that the skip check catches a margin too small
+  qx += qx * ROUGH_SKEW;
+  qy -= qy * ROUGH_SKEW;
+#endif
+  margin = 1e-5 * (abs(qx) + abs(qy) + abs(float(centerX)) + abs(float(centerY)) + 1.0);
+#ifdef ROUGH_NO_MARGIN
+  margin = 0.0;
+#endif
+  return vec2(float(centerX) + qx, float(centerY) + qy);
+}
+
+// a rounded corner's coordinate as the setup gets it (int of the point + 0.5), when the rough point leaves no doubt
+// which whole number that is: no whole number within the margin of it
+bool roundsSurely(float f, float margin, out int v) {
+  float r = f + 0.5;
+  v = int(r);
+  float fr = fract(r);
+  return abs(r) < 4.0e6 && min(fr, 1.0 - fr) > margin + 1e-6 * abs(r);
+}
+
+// Whether a face surely draws nothing (11/19/2026: the compute pass then writes only a mark, alpha 255, in place of
+// its corners, and the count, the geometry stage and the painter's draw all skip it on that mark): turned away by a
+// clear margin, or with all three corners leaving no doubt where they round to, rounded to no area or off the screen.
+// Asked of the corners exactly as the compute pass writes them, turned exactly as the setup turns them (cpu_turn), so
+// only the screen points differ, by the card's division, and the margins cover that many times over: a face is
+// never skipped that the setup (setup.glsl's setupFace) would draw (ShaderCheck's skip check). Faces across the near
+// plane are left to the setup.
+bool surelyEmpty(vec3 a, vec3 b, vec3 c) {
+  vec3 k0 = cpu_turn(a), k1 = cpu_turn(b), k2 = cpu_turn(c);
+  if (!(k0.z >= 50.0 && k1.z >= 50.0 && k2.z >= 50.0)) {
+    return false;
+  }
+  float m0, m1, m2;
+  vec2 s0 = roughScreen(k0, m0), s1 = roughScreen(k1, m1), s2 = roughScreen(k2, m2);
+  // the setup's facing test, (s0 - s1) x (s2 - s1) > 0 to be drawn, here with all its error allowed against it
+  float ax = s0.x - s1.x, ay = s0.y - s1.y, cx = s2.x - s1.x, cy = s2.y - s1.y;
+  float e01 = m0 + m1, e21 = m2 + m1;
+  float facing = ax * cy - cx * ay;
+  float slack = 2.0 * (e01 * (abs(cx) + abs(cy)) + e21 * (abs(ax) + abs(ay)) + 2.0 * e01 * e21) + 1e-5 * (abs(ax * cy) + abs(cx * ay));
+#ifdef ROUGH_NO_MARGIN
+  slack = 0.0;
+#endif
+  if (facing + slack <= 0.0) {
+    return true;
+  }
+  // the setup's coverage test (setup.glsl's coverage) on the very corners it rounds to
+  int x0, y0, x1, y1, x2, y2;
+  if (!(roundsSurely(s0.x, m0, x0) && roundsSurely(s0.y, m0, y0) && roundsSurely(s1.x, m1, x1) && roundsSurely(s1.y, m1, y1)
+      && roundsSurely(s2.x, m2, x2) && roundsSurely(s2.y, m2, y2))) {
+    return false;
+  }
+  int det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+  if (det == 0) {
+    return true;
+  }
+  int minX = max(0, min(x0, min(x1, x2)));
+  int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));
+  int minY = max(0, min(y0, min(y1, y2)));
+  int maxY = min(viewSize.y, max(y0, max(y1, y2))) - 1;
+  return minX > maxX || minY > maxY;
+}
+#endif
+
 #ifndef COUNTING_SORT
 // Each adjusted priority's stretch of renderPris put in the order it's drawn (the farthest first; at the same distance
 // the lower face number first), in place, by a bitonic network whose comparators all put the larger key at the lower
@@ -340,9 +416,24 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
     thisrvB.ahsl &= ~0xff0000;
     thisrvC.ahsl &= ~0xff0000;
 
-    // the texture slots, worked out before anything is written (the fused count needs them)
-    vec4 uA = vec4(0), uB = vec4(0), uC = vec4(0);
-    if (toffset >= 0) {
+#ifdef SKIP_EMPTY
+    // a face that surely draws nothing (fully see-through, or surelyEmpty): only the mark that says so
+    if (((thisrvA.ahsl >> 24) & 0xff) == 255 || surelyEmpty(vertA.xyz, vertB.xyz, vertC.xyz)) {
+      vout[outOffset + myOffset * 3].ahsl = int(0xff000000u);
+      return;
+    }
+#endif
+
+    // write to out buffer
+    vout[outOffset + myOffset * 3] = vert(vertA.xyz, thisrvA.ahsl | mark);
+    vout[outOffset + myOffset * 3 + 1] = vert(vertB.xyz, thisrvB.ahsl | mark);
+    vout[outOffset + myOffset * 3 + 2] = vert(vertC.xyz, thisrvC.ahsl | mark);
+
+    if (toffset < 0) {
+      uvout[outOffset + myOffset * 3] = vec4(0);
+      uvout[outOffset + myOffset * 3 + 1] = vec4(0);
+      uvout[outOffset + myOffset * 3 + 2] = vec4(0);
+    } else {
       vec4 texA, texB, texC;
 
       if (flags >= 0) {
@@ -368,25 +459,9 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
       texA = hillskew_rel(texA, pos, place, hillskew, minfo.y, plane);
       texB = hillskew_rel(texB, pos, place, hillskew, minfo.y, plane);
       texC = hillskew_rel(texC, pos, place, hillskew, minfo.y, plane);
-      uA = texA.wxyz;
-      uB = texB.wxyz;
-      uC = texC.wxyz;
-    }
-
-#ifdef FUSED_COUNT
-    bool keep = countFace(outOffset / 3 + myOffset, vertA.xyz, vertB.xyz, vertC.xyz, thisrvA.ahsl | mark,
-      thisrvB.ahsl | mark, thisrvC.ahsl | mark, uA, uB, uC);
-#else
-    bool keep = true;
-#endif
-    if (keep) {
-      // write to out buffer
-      vout[outOffset + myOffset * 3] = vert(vertA.xyz, thisrvA.ahsl | mark);
-      vout[outOffset + myOffset * 3 + 1] = vert(vertB.xyz, thisrvB.ahsl | mark);
-      vout[outOffset + myOffset * 3 + 2] = vert(vertC.xyz, thisrvC.ahsl | mark);
-      uvout[outOffset + myOffset * 3] = uA;
-      uvout[outOffset + myOffset * 3 + 1] = uB;
-      uvout[outOffset + myOffset * 3 + 2] = uC;
+      uvout[outOffset + myOffset * 3] = texA.wxyz;
+      uvout[outOffset + myOffset * 3 + 1] = texB.wxyz;
+      uvout[outOffset + myOffset * 3 + 2] = texC.wxyz;
     }
   }
 }

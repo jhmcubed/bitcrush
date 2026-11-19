@@ -103,11 +103,13 @@ void writeRec(int at, Rec r, int face) {
 
 // the face's triangles: full false, only how many (setup.glsl's setupFace)
 int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
-  vert a = vin[f * 3], b = vin[f * 3 + 1], c = vin[f * 3 + 2];
-  alpha = (a.ahsl >> 24) & 0xff;
+  // the first corner's colour word first: alpha 255 is also the compute pass's mark for a face it skipped (SKIP_EMPTY),
+  // whose other corners it didn't write
+  alpha = (vin[f * 3].ahsl >> 24) & 0xff;
   if (alpha >= 255) {
     return 0;
   }
+  vert a = vin[f * 3], b = vin[f * 3 + 1], c = vin[f * 3 + 2];
   vec4 ua = uvin[f * 3], ub = uvin[f * 3 + 1], uc = uvin[f * 3 + 2];
   vec3 v[3] = vec3[3](a.pos, b.pos, c.pos);
   int ah[3] = int[3](a.ahsl, b.ahsl, c.ahsl);

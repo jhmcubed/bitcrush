@@ -329,14 +329,14 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "fusedCount",
-		name = "Count in the compute pass",
-		description = "The record path's count of each face's triangles done by the compute pass as it writes the face, and faces that draw nothing not written. Off: the count as its own pass over every face, every face written, as before (to compare; the same picture).",
+		keyName = "skipEmpty",
+		name = "Skip faces that draw nothing",
+		description = "The compute pass writes only a mark for a face that surely draws nothing (turned away, or covering no pixel), not its corners, and the count passes over it. Off: every face written, the programs as they were (to compare; the same picture).",
 		position = 49,
 		section = diagnostics,
 		hidden = !Build.DEVELOPER
 	)
-	default boolean fusedCount()
+	default boolean skipEmpty()
 	{
 		return true;
 	}

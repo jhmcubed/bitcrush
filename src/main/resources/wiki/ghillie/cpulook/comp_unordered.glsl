@@ -25,9 +25,7 @@
 
 #include version_header
 
-#include count_config
 #include "comp_common.glsl"
-#include "count_fused.glsl"
 
 layout(local_size_x = 6) in;
 
@@ -73,33 +71,22 @@ void main() {
   // and every corner of it marked as a ground tile (bit 20): the CPU textures tiles with its own routine
   int mark = ((flags & (1 << 27)) != 0 ? 0x400000 : 0) | 0x100000;
 
-  // the texture slots, worked out before anything is written (the fused count needs them)
-  vec4 uA = vec4(0), uB = vec4(0), uC = vec4(0);
-  if (toffset >= 0) {
-    if (flags >= 0) {
-      uA = texPos + temptexb[toffset + localId * 3];
-      uB = texPos + temptexb[toffset + localId * 3 + 1];
-      uC = texPos + temptexb[toffset + localId * 3 + 2];
-    } else {
-      uA = texPos + texb[toffset + localId * 3];
-      uB = texPos + texb[toffset + localId * 3 + 1];
-      uC = texPos + texb[toffset + localId * 3 + 2];
-    }
-  }
+  // position vertices in scene and write to out buffer
+  vout[outOffset + myOffset * 3] = vert(vertA, thisA.ahsl | mark);
+  vout[outOffset + myOffset * 3 + 1] = vert(vertB, thisB.ahsl | mark);
+  vout[outOffset + myOffset * 3 + 2] = vert(vertC, thisC.ahsl | mark);
 
-#ifdef FUSED_COUNT
-  bool keep = countFace(int(outOffset / 3 + myOffset), vertA, vertB, vertC, thisA.ahsl | mark, thisB.ahsl | mark,
-    thisC.ahsl | mark, uA, uB, uC);
-#else
-  bool keep = true;
-#endif
-  if (keep) {
-    // position vertices in scene and write to out buffer
-    vout[outOffset + myOffset * 3] = vert(vertA, thisA.ahsl | mark);
-    vout[outOffset + myOffset * 3 + 1] = vert(vertB, thisB.ahsl | mark);
-    vout[outOffset + myOffset * 3 + 2] = vert(vertC, thisC.ahsl | mark);
-    uvout[outOffset + myOffset * 3] = uA;
-    uvout[outOffset + myOffset * 3 + 1] = uB;
-    uvout[outOffset + myOffset * 3 + 2] = uC;
+  if (toffset < 0) {
+    uvout[outOffset + myOffset * 3] = vec4(0);
+    uvout[outOffset + myOffset * 3 + 1] = vec4(0);
+    uvout[outOffset + myOffset * 3 + 2] = vec4(0);
+  } else if (flags >= 0) {
+    uvout[outOffset + myOffset * 3] = texPos + temptexb[toffset + localId * 3];
+    uvout[outOffset + myOffset * 3 + 1] = texPos + temptexb[toffset + localId * 3 + 1];
+    uvout[outOffset + myOffset * 3 + 2] = texPos + temptexb[toffset + localId * 3 + 2];
+  } else {
+    uvout[outOffset + myOffset * 3] = texPos + texb[toffset + localId * 3];
+    uvout[outOffset + myOffset * 3 + 1] = texPos + texb[toffset + localId * 3 + 1];
+    uvout[outOffset + myOffset * 3 + 2] = texPos + texb[toffset + localId * 3 + 2];
   }
 }

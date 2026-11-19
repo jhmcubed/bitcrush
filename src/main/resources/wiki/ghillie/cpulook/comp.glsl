@@ -26,7 +26,7 @@
 #include version_header
 
 #include thread_config
-#include count_config
+#include cull_config
 
 shared int totalNum[12];       // number of faces with a given priority
 shared int totalDistance[12];  // sum of distances to faces of a given priority
@@ -41,7 +41,6 @@ shared int renderPris[THREAD_COUNT * FACES_PER_THREAD];  // priority for face dr
 layout(local_size_x = THREAD_COUNT) in;
 
 #include "common.glsl"
-#include "count_fused.glsl"
 #include "priority_render.glsl"
 
 void main() {

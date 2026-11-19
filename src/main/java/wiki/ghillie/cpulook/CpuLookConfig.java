@@ -393,6 +393,19 @@ public interface CpuLookConfig extends Config
 		return false;
 	}
 
+	@ConfigItem(
+		keyName = "logGround",
+		name = "Log the ground around me",
+		description = "Writes the tiles within four of yours, every level, to RuneLite's log, once: each tile's settings, heights and paint or shaped model, and every object's model in full with the camera, as lines starting \"Bitcrush ground dump:\". For drawing a spot again away from the game. Turn it off and on again for another.",
+		position = 35,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean logGround()
+	{
+		return false;
+	}
+
 	@Range(
 		max = MAX_DISTANCE
 	)

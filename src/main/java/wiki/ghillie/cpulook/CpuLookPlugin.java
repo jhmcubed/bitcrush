@@ -446,6 +446,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private volatile boolean logDrawOrderNext;
 	// the developer build's "Log my player's model": the local player's next draw dumped to the log (ModelDump)
 	private volatile boolean logPlayerModelNext;
+	// Diagnostics -> Log the ground around me: on the next frame (GroundDump)
+	private volatile boolean logGroundNext;
 
 	private double cameraX, cameraY, cameraZ;
 	// the frame's camera turn in 16,384ths, as the uniforms carry it (the developer build's model dump)
@@ -870,6 +872,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			else if (configChanged.getKey().equals("logPlayerModel"))
 			{
 				logPlayerModelNext = Build.DEVELOPER && config.logPlayerModel();
+			}
+			else if (configChanged.getKey().equals("logGround"))
+			{
+				logGroundNext = Build.DEVELOPER && config.logGround();
 			}
 			else if (configChanged.getKey().equals("removeVertexSnapping"))
 			{
@@ -2393,6 +2399,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void draw(int overlayColor)
 	{
+		if (Build.DEVELOPER && logGroundNext)
+		{
+			logGroundNext = false;
+			logGround();
+		}
 		if (!timing)
 		{
 			finishZone();
@@ -5612,6 +5623,33 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (program > 0)
 		{
 			GL43C.glObjectLabel(GL43C.GL_PROGRAM, program, "Bitcrush: " + name);
+		}
+	}
+
+	// Diagnostics -> Log the ground around me (GroundDump): the tiles within four of the local player's, every level
+	private void logGround()
+	{
+		final net.runelite.api.Player me = client.getLocalPlayer();
+		if (me == null)
+		{
+			return;
+		}
+		final WorldView wv = client.getTopLevelWorldView();
+		final net.runelite.api.coords.LocalPoint at = me.getLocalLocation();
+		try
+		{
+			final java.util.List<String> lines = GroundDump.dump(wv, at.getSceneX(), at.getSceneY(), 4, 0, (int) cameraX, (int) cameraY,
+				(int) cameraZ, cameraYawUnits, cameraPitchUnits, client.getScale(), client.getCenterX(), client.getCenterY(),
+				client.getViewportWidth(), client.getViewportHeight());
+			for (String line : lines)
+			{
+				log.info("Bitcrush ground dump: {}", line);
+			}
+			log.info("Bitcrush ground dump: done, {} lines", lines.size());
+		}
+		catch (RuntimeException ex)
+		{
+			log.warn("Bitcrush ground dump failed", ex);
 		}
 	}
 

@@ -101,6 +101,8 @@ class FrameTimer
 	private int modelFrames;
 	private boolean tickSeen;
 	private long recordsSolid, recordsSee;
+	// render mode 2 models and the batches they were drawn in (CpuLookPlugin.drawPainterBatches), and the frames
+	private long painterModels, painterBatches, painterFrames;
 	// CPU Look working out the CPU's order itself (the re-sort diagnostic's CpuOrder.build): time, draws, frames
 	private long orderNs, orderDraws, orderReadNs, orderViewNs, orderSweepNs;
 	// zone mode (stage B): the moving models copied inside the client's drawTemp and drawDynamic, and how many
@@ -246,6 +248,13 @@ class FrameTimer
 		recordsSolid += solid;
 		recordsSee += see;
 		recordReads++;
+	}
+
+	void painters(int models, int batches)
+	{
+		painterModels += models;
+		painterBatches += batches;
+		painterFrames++;
 	}
 
 	void drawStart()
@@ -497,11 +506,13 @@ class FrameTimer
 		}
 		log.info(String.format("CPU Look frame timings, the graphics card (ms, over %d frames): compute %s (%s); "
 				+ "the scene %s (the records: counting %s, placing %s, noting their faces %s, writing %s; the solid faces %s, "
-				+ "the see-through faces %s); records a frame: %s solid, %s see-through",
+				+ "the see-through faces %s); records a frame: %s solid, %s see-through%s",
 			Math.max(gpuN[G_COMPUTE], gpuN[G_SCENE]), gpu(G_COMPUTE), tiers,
 			gpu(G_SCENE), gpu(G_COUNT), gpu(G_PLACE), gpu(G_SCATTER), gpu(G_WRITE), gpu(G_SOLID), gpu(G_SEE),
 			recordReads > 0 ? String.format("%.0f", recordsSolid / (double) recordReads) : "-",
-			recordReads > 0 ? String.format("%.0f", recordsSee / (double) recordReads) : "-"));
+			recordReads > 0 ? String.format("%.0f", recordsSee / (double) recordReads) : "-",
+			painterFrames > 0 ? String.format("; players and NPCs (render mode 2) a frame: %.0f models in %.1f batches",
+				painterModels / (double) painterFrames, painterBatches / (double) painterFrames) : ""));
 		reportSlow();
 
 		walk = callbacks = post = drawing = upload = sceneCommands = swap = frame = rest = between = 0;
@@ -512,6 +523,7 @@ class FrameTimer
 		modelFrames = 0;
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
+		painterModels = painterBatches = painterFrames = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;
@@ -612,6 +624,7 @@ class FrameTimer
 		modelFrames = 0;
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
+		painterModels = painterBatches = painterFrames = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;

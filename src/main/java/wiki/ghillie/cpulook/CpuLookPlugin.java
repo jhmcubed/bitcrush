@@ -424,6 +424,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// (claude/cpu-look.md, section 9, "Players and NPCs: render mode 2")
 	private int[] painterFirst = new int[64], painterCount = new int[64];
 	private int painterRanges;
+	// each one's place and own bounds (PainterBatch), the frame's camera for its screen box, and the batches
+	private int[] painterX = new int[64], painterY = new int[64], painterZ = new int[64];
+	private float[] painterM = new float[64], painterY0 = new float[64], painterY1 = new float[64];
+	private final PainterBatch painterBatch = new PainterBatch();
+	private IntBuffer painterFirstBuf = BufferUtils.createIntBuffer(256), painterCountBuf = BufferUtils.createIntBuffer(256);
 	private boolean drawnPainter;
 	private int uniPainterPass, uniPainterBand, uniPainterDepth;
 	// the hide switches (diagnostics), read once a frame: RuneLite's config proxy is slow to read for every one of the
@@ -480,6 +485,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int[] upOff = new int[512], upUv = new int[512], upLen = new int[512], upFlags = new int[512], upX = new int[512],
 		upY = new int[512], upZ = new int[512];
 	private boolean[] upSee = new boolean[512], upPainter = new boolean[512];
+	// a render mode 2 model's own bounds (PainterBatch): the greatest distance of a corner from its axis, its lowest and
+	// highest corner (the model's y, down positive)
+	private float[] upPm = new float[512], upPy0 = new float[512], upPy1 = new float[512];
 	private int ups;
 	private double cameraYaw, cameraPitch;
 
@@ -601,6 +609,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 						//		msg Pixel-path performance warning: Pixel transfer is synchronized with 3D rendering.
 						GL43C.glDebugMessageControl(GL43C.GL_DEBUG_SOURCE_API, GL43C.GL_DEBUG_TYPE_PERFORMANCE,
 							GL43C.GL_DONT_CARE, 0x20052, false);
+
+						// the pass names' own groups (Name the card's passes for a profiler): every push and pop would
+						// otherwise be printed (his GPU Trace: 33.7 MB of them in two minutes)
+						GL43C.glDebugMessageControl(GL43C.GL_DONT_CARE, GL43C.GL_DEBUG_TYPE_PUSH_GROUP, GL43C.GL_DONT_CARE,
+							(IntBuffer) null, false);
+						GL43C.glDebugMessageControl(GL43C.GL_DONT_CARE, GL43C.GL_DEBUG_TYPE_POP_GROUP, GL43C.GL_DONT_CARE,
+							(IntBuffer) null, false);
 					}
 				}
 
@@ -1919,6 +1934,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			.put(Float.floatToIntBits(Perspective.SINEF14[pitch])).put(Float.floatToIntBits(Perspective.COSINEF14[pitch]));
 		uniformBuf.flip();
 		sceneUploader.setCamera(camX, camY, camZ, yaw, pitch);
+		painterBatch.camera(camX, camY, camZ, Perspective.SINEF14[yaw], Perspective.COSINEF14[yaw], Perspective.SINEF14[pitch],
+			Perspective.COSINEF14[pitch], client.getCenterX(), client.getCenterY(), client.getScale());
 
 		updateBuffer(uniformBuffer, GL43C.GL_UNIFORM_BUFFER, uniformBuf, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
 		GL43C.glBindBuffer(GL43C.GL_UNIFORM_BUFFER, 0);
@@ -2395,7 +2412,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int canvasHeight = client.getCanvasHeight();
 		final int canvasWidth = client.getCanvasWidth();
 
+		pass("the interface's upload");
 		prepareInterfaceTexture(canvasWidth, canvasHeight);
+		passEnd();
 		if (timing)
 		{
 			timer.uploaded();
@@ -2469,7 +2488,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboCpu);
 			GL43C.glViewport(0, 0, viewportWidth, viewportHeight);
 			GL43C.glClearDepth(0d);
+			pass("clear");
 			GL43C.glClear(GL43C.GL_COLOR_BUFFER_BIT | GL43C.GL_DEPTH_BUFFER_BIT);
+			passEnd();
 			if (timing)
 			{
 				timer.mark(FrameTimer.SCENE_START);
@@ -3129,6 +3150,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		Object[] key = new Object[64], owner = new Object[64];
 		boolean[] temp = new boolean[64], see = new boolean[64], painter = new boolean[64];
 		int[] off = new int[64], uvOff = new int[64], len = new int[64], flags = new int[64], x = new int[64], y = new int[64], z = new int[64];
+		// a render mode 2 copy's own bounds (PainterBatch.bounds)
+		float[] pm = new float[64], py0 = new float[64], py1 = new float[64];
 		// where its vertices and texture points start in the frame's temporary buffers (set by zoneMerge)
 		int base, uvBase;
 
@@ -3158,6 +3181,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				x = Arrays.copyOf(x, k);
 				y = Arrays.copyOf(y, k);
 				z = Arrays.copyOf(z, k);
+				pm = Arrays.copyOf(pm, k);
+				py0 = Arrays.copyOf(py0, k);
+				py1 = Arrays.copyOf(py1, k);
 			}
 			return n++;
 		}
@@ -3205,6 +3231,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		s.z[i] = z;
 		s.see[i] = model.getFaceTransparencies() != null || model.getTransparency() != 0;
 		s.painter[i] = painter;
+		if (painter)
+		{
+			PainterBatch.bounds(model.getVerticesX(), model.getVerticesY(), model.getVerticesZ(), model.getVerticesCount(), s.pm, s.py0, s.py1, i);
+		}
 		s.v += len;
 		if (hasUv)
 		{
@@ -3255,6 +3285,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 						upZ = Arrays.copyOf(upZ, c);
 						upSee = Arrays.copyOf(upSee, c);
 						upPainter = Arrays.copyOf(upPainter, c);
+						upPm = Arrays.copyOf(upPm, c);
+						upPy0 = Arrays.copyOf(upPy0, c);
+						upPy1 = Arrays.copyOf(upPy1, c);
 					}
 					idx = ups++;
 					upOff[idx] = splitV + s.base + s.off[k];
@@ -3266,6 +3299,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					upZ[idx] = s.z[k];
 					upSee[idx] = s.see[k];
 					upPainter[idx] = s.painter[k];
+					upPm[idx] = s.pm[k];
+					upPy0[idx] = s.py0[k];
+					upPy1[idx] = s.py1[k];
 				}
 				if (s.temp[k])
 				{
@@ -3378,7 +3414,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if (upPainter[i] && len > 0)
 		{
-			painterRange(before, len);
+			// hill-skewed models (not players or NPCs) are bent on the card: their bounds unknown here
+			if ((upFlags[i] & (1 << 26)) == 0)
+			{
+				painterRange(before, len, upX[i], upY[i], upZ[i], upPm[i], upPy0[i], upPy1[i]);
+			}
+			else
+			{
+				painterRange(before, len);
+			}
 		}
 	}
 
@@ -4783,6 +4827,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUniform1i(uniAlphaPass, 1);
 		GL43C.glUniform1i(uniPainterPass, 2);
 		final boolean band = painterBand > 0 && fboPainter != -1;
+		if (!band && (!Build.DEVELOPER || config.painterBatches()))
+		{
+			drawPainterBatches();
+			GL43C.glUniform1i(uniPainterPass, 0);
+			return;
+		}
 		if (band)
 		{
 			GL43C.glUniform1i(uniPainterDepth, 4);
@@ -4820,6 +4870,48 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
 		}
 		GL43C.glUniform1i(uniPainterPass, 0);
+	}
+
+	// Render mode 2 models in batches (11/19/2026): each model's colour then its keys (drawPainters), but the models whose
+	// screen boxes don't overlap any earlier one's in the batch drawn together, a multi-draw for the colour and one for
+	// the keys, instead of two draws a model, each of which the card waited on (his GPU Trace: 84 draws, 82 waits, 0.87
+	// ms at the GE). Models that share no pixels can't affect each other, and a model comes in a later batch than every
+	// earlier model it overlaps (PainterBatch.layers), so every pixel is what the one-at-a-time drawing gives.
+	private void drawPainterBatches()
+	{
+		final int n = painterRanges;
+		final int batches = painterBatch.layers(n, painterX, painterY, painterZ, painterM, painterY0, painterY1, viewportWidth, viewportHeight);
+		if (painterFirstBuf.capacity() < n)
+		{
+			painterFirstBuf = BufferUtils.createIntBuffer(n * 2);
+			painterCountBuf = BufferUtils.createIntBuffer(n * 2);
+		}
+		final int[] layer = painterBatch.layer;
+		for (int l = 0; l < batches; l++)
+		{
+			painterFirstBuf.clear();
+			painterCountBuf.clear();
+			for (int i = 0; i < n; i++)
+			{
+				if (layer[i] == l)
+				{
+					painterFirstBuf.put(painterFirst[i]);
+					painterCountBuf.put(painterCount[i]);
+				}
+			}
+			painterFirstBuf.flip();
+			painterCountBuf.flip();
+			GL43C.glDepthMask(false);
+			GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, painterFirstBuf, painterCountBuf);
+			GL43C.glColorMask(false, false, false, false);
+			GL43C.glDepthMask(true);
+			GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, painterFirstBuf, painterCountBuf);
+			GL43C.glColorMask(true, true, true, true);
+		}
+		if (timing)
+		{
+			timer.painters(n, batches);
+		}
 	}
 
 	// stage B's B1 check: one draw as the client hands it over
@@ -4978,16 +5070,36 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
-	// a render mode 2 model's stretch of triangles (never joined to the last: each is drawn on its own)
+	// a render mode 2 model's stretch of triangles (never joined to the last), with nothing known of where it is: it
+	// overlaps every other in PainterBatch, so it's drawn on its own
 	private void painterRange(int first, int count)
+	{
+		painterRange(first, count, 0, 0, 0, -1f, 0f, 0f);
+	}
+
+	// ... and with its place and its own bounds (PainterBatch.bounds; m < 0: unknown)
+	private void painterRange(int first, int count, int x, int y, int z, float m, float y0, float y1)
 	{
 		if (painterRanges == painterFirst.length)
 		{
-			painterFirst = Arrays.copyOf(painterFirst, painterRanges * 2);
-			painterCount = Arrays.copyOf(painterCount, painterRanges * 2);
+			final int c = painterRanges * 2;
+			painterFirst = Arrays.copyOf(painterFirst, c);
+			painterCount = Arrays.copyOf(painterCount, c);
+			painterX = Arrays.copyOf(painterX, c);
+			painterY = Arrays.copyOf(painterY, c);
+			painterZ = Arrays.copyOf(painterZ, c);
+			painterM = Arrays.copyOf(painterM, c);
+			painterY0 = Arrays.copyOf(painterY0, c);
+			painterY1 = Arrays.copyOf(painterY1, c);
 		}
 		painterFirst[painterRanges] = first;
 		painterCount[painterRanges] = count;
+		painterX[painterRanges] = x;
+		painterY[painterRanges] = y;
+		painterZ[painterRanges] = z;
+		painterM[painterRanges] = m;
+		painterY0[painterRanges] = y0;
+		painterY1[painterRanges] = y1;
 		painterRanges++;
 	}
 

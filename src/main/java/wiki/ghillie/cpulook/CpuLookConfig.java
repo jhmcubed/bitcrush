@@ -355,6 +355,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "painterBatches",
+		name = "Players and NPCs in batches",
+		description = "Render mode 2 models (players, most NPCs) whose screen boxes don't overlap drawn together, two draws a batch instead of two a model; the same pixels. Off: one model at a time, as before (to compare).",
+		position = 51,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean painterBatches()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

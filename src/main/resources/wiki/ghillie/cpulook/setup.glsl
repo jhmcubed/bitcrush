@@ -257,7 +257,14 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
 // near plane can leave four corners): how many, in r0 and r1. The callers have already left out fully see-through faces
 // and those of other passes. full false: only how many (the record path's count), every decision made by the same
 // code (the corners, the facing tests, the near cut, coverage) and the rest of the setup left out; r0 and r1 unset.
+// ONE_RECORD (the record path's write, setup_write_comp.glsl; 11/19/2026): only the record asked for is set up, in r0
+// (want 0: the face's first record, 1: its second), so a thread never holds two triangles' setups at once (Jace's GPU
+// Trace had the write's card 78% idle, its threads too heavy for many to run at once)
+#ifdef ONE_RECORD
+int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool full, int want, out Rec r0) {
+#else
 int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool full, out Rec r0, out Rec r1) {
+#endif
   corner k[3];
   int col[3];
   for (int i = 0; i < 3; i++) {
@@ -329,6 +336,14 @@ int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool f
   if (!full) {
     return (n >= 3 && covers(sp[0], sp[1], sp[2]) ? 1 : 0) + (n == 4 && covers(sp[0], sp[2], sp[3]) ? 1 : 0);
   }
+#ifdef ONE_RECORD
+  // the face's first record is its first triangle when that draws, else its second; its second record is always its
+  // second triangle (there's a second record only when both draw); covers is setupTriangle's own first test
+  if (want == 0 && n >= 3 && covers(sp[0], sp[1], sp[2])) {
+    return setupTriangle(sp[0], sp[1], sp[2], sc[0], sc[1], sc[2], sk[0], sk[1], sk[2], vec3(sz[0], sz[1], sz[2]), flags, t0, t1, t40, alpha, bias, r0) ? 1 : 0;
+  }
+  return n == 4 && setupTriangle(sp[0], sp[2], sp[3], sc[0], sc[2], sc[3], sk[0], sk[2], sk[3], vec3(sz[0], sz[2], sz[3]), flags, t0, t1, t40, alpha, bias, r0) ? 1 : 0;
+#else
   int count = 0;
   if (n >= 3 && setupTriangle(sp[0], sp[1], sp[2], sc[0], sc[1], sc[2], sk[0], sk[1], sk[2], vec3(sz[0], sz[1], sz[2]), flags, t0, t1, t40, alpha, bias, r0)) {
     count = 1;
@@ -345,4 +360,5 @@ int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool f
     }
   }
   return count;
+#endif
 }

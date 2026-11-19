@@ -87,6 +87,9 @@ layout(std430, binding = 6) readonly buffer faces_of {
 
 #define SCAN_BLOCK 4096
 
+#ifdef WRITE_RECORDS
+#define ONE_RECORD
+#endif
 #include "setup.glsl"
 
 void writeRec(int at, Rec r, int face) {
@@ -101,8 +104,12 @@ void writeRec(int at, Rec r, int face) {
   recs[b + 7] = ivec4(r.box.x | (r.box.z << 16), r.box.y | (r.box.w << 16), face, 0);
 }
 
-// the face's triangles: full false, only how many (setup.glsl's setupFace)
+// the face's triangles: full false, only how many (setup.glsl's setupFace); in the write, the one record asked for
+#ifdef WRITE_RECORDS
+int faceSetup(int f, bool full, int want, out int alpha, out Rec r0) {
+#else
 int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
+#endif
   // the first corner's colour word first: alpha 255 is also the compute pass's mark for a face it skipped (SKIP_EMPTY),
   // whose other corners it didn't write
   alpha = (vin[f * 3].ahsl >> 24) & 0xff;
@@ -116,14 +123,18 @@ int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
   vec3 tp[3] = vec3[3](ua.yzw, ub.yzw, uc.yzw);
   // the texture's number + 1 and the face's bias, as vert.glsl reads them from the first corner's texture slot
   int tx = int(ua.x);
+#ifdef WRITE_RECORDS
+  return setupFace(v, ah, tx & 511, (((tx >> 9) & 255) ^ 128) - 128, tp, full, want, r0);  // the bias signed, as the CPU's
+#else
   return setupFace(v, ah, tx & 511, (((tx >> 9) & 255) ^ 128) - 128, tp, full, r0, r1);  // the bias signed, as the CPU's
+#endif
 }
 
 void main() {
   int i = int(gl_GlobalInvocationID.x);
   int alpha;
-  Rec r0, r1;
 #ifndef WRITE_RECORDS
+  Rec r0, r1;
   if (i >= faceCount) {
     return;
   }
@@ -142,7 +153,8 @@ void main() {
   }
   uint fo = faceOf[i];
   int f = int(fo & 0x7fffffffu);
-  faceSetup(f, true, alpha, r0, r1);
-  writeRec(i, (fo >> 31) != 0u ? r1 : r0, f);
+  Rec r0;
+  faceSetup(f, true, int(fo >> 31), alpha, r0);
+  writeRec(i, r0, f);
 #endif
 }

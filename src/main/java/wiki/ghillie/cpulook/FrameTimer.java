@@ -459,13 +459,18 @@ class FrameTimer
 		final double n = frames;
 		log.info(String.format("CPU Look frame timings, average over %d frames (ms): a frame %.2f (%.0f a second); "
 				+ "processor: the game walking the scene %.2f, CPU Look's calls for what it hands over %.2f (%.0f calls), "
-				+ "uploads and compute dispatch %.2f, the frame's drawing %.2f (the interface's upload %.2f, the scene's "
+				+ "uploads and compute dispatch %.2f, the frame's drawing %.2f (%sthe interface's upload %.2f, the scene's "
 				+ "commands %.2f, the buffer swap %.2f), the rest of the frame (the game's own work and its frame cap's wait) %.2f "
 				+ "(of it, between the scene's work and the frame's drawing, where the client draws its interface and RuneLite its "
 				+ "overlays, %.2f); %.0f triangles a frame%s",
 			frames, frame / n / 1e6, frame > 0 ? 1e9 * n / frame : 0,
 			walk / n / 1e6, callbacks / n / 1e6, draws / n,
-			post / n / 1e6, drawing / n / 1e6, upload / n / 1e6, sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
+			post / n / 1e6, drawing / n / 1e6,
+			// in zone mode the frame's drawing starts with the wait for its thread and the uploads (11/19/2026: they were
+			// in "the interface's upload" as well as below)
+			zoneThreadFrames > 0 ? String.format("zone mode's wait for its thread and its uploads %.2f, ", (zoneWaitNs + zoneUploadNs) / n / 1e6) : "",
+			Math.max(0, upload - (zoneThreadFrames > 0 ? zoneWaitNs + zoneUploadNs : 0)) / n / 1e6,
+			sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
 			between / n / 1e6,
 			triangles / n,
 			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below), and its copying of the "

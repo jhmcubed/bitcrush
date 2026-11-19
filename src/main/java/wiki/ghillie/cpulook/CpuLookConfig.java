@@ -180,16 +180,49 @@ public interface CpuLookConfig extends Config
 		return true;
 	}
 
+	enum PlayerFaces
+	{
+		CPU("As the CPU"),
+		DEPTH("Nearest wins"),
+		BOTH("Both fixed");
+
+		private final String name;
+
+		PlayerFaces(String name)
+		{
+			this.name = name;
+		}
+
+		@Override
+		public String toString()
+		{
+			return name;
+		}
+	}
+
 	@ConfigItem(
-		keyName = "playersByDepth",
-		name = "Players by depth",
-		description = "Not the CPU's look, off by default. The CPU draws a player's own faces (and most NPCs') in the game's sorted order, a later face covering an earlier one even where the earlier is nearer: trousers cover boots that poke through them, but some items worn on the back cover part of the torso, in the CPU renderer and RuneLite's GPU plugins alike. On: the nearer face wins inside the model too, so the torso stays whole and boots can poke through trousers again.",
+		keyName = "playerFaces",
+		name = "Players' own faces",
+		description = "How a player's own faces (and most NPCs') cover each other. As the CPU (the default): in the game's sorted order, a later face covering an earlier one even where the earlier is nearer: trousers cover boots that poke through them, but some items worn on the back cover part of the torso, as in the CPU renderer and RuneLite's GPU plugins. Nearest wins: the torso stays whole, and boots poke through trousers. Both fixed (Bitcrush's own, not the CPU's look): the game's order for faces close together, the nearest for faces far apart (Band).",
 		position = 6,
 		section = cpuLook
 	)
-	default boolean playersByDepth()
+	default PlayerFaces playerFaces()
 	{
-		return false;
+		return PlayerFaces.CPU;
+	}
+
+	@Range(min = 1, max = 64)
+	@ConfigItem(
+		keyName = "playerFacesBand",
+		name = "Band",
+		description = "For Both fixed: how far behind a player's nearest face at a pixel (in game units) one of its faces can still show by the game's order. Beyond it the nearer face wins. 12 keeps trousers over boots and a log basket behind the torso.",
+		position = 7,
+		section = cpuLook
+	)
+	default int playerFacesBand()
+	{
+		return 12;
 	}
 
 	@ConfigItem(

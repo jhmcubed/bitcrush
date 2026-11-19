@@ -359,6 +359,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int fboCpu = -1;
 	private int texCpu = -1;
 	private int rboCpuDepth = -1;
+	// "Players' own faces: Both fixed": a render mode 2 model's own greatest key at each pixel, drawn alone (a depth
+	// texture in a framebuffer of its own, read by the colour pass)
+	private int fboPainter = -1;
+	private int texPainterDepth = -1;
 	// (stage A4's winners, each pixel's solid winner kept for the see-through pass, went 11/19/2026: the CPU draws all its
 	// solid faces before any see-through one, so a see-through face blends wherever its key beats the solid one's)
 	private int lastCpuWidth = -1;
@@ -394,8 +398,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private boolean orderWarned;
 	// this frame's switches, read once in drawScene
 	private boolean groundHides;
-	// The CPU look's "Players by depth" (off: render mode 2 models drawn as the CPU draws them), read once a frame
+	// The CPU look's "Players' own faces", read once a frame: render mode 2 models drawn as the CPU draws them (unless
+	// "Nearest wins"); with "Both fixed" the band in game units (else 0)
 	private boolean painterModels;
+	private int painterBand;
 	private boolean orderTest;
 	private Scene frameScene;
 	// the camera in whole units, this frame
@@ -417,7 +423,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int[] painterFirst = new int[64], painterCount = new int[64];
 	private int painterRanges;
 	private boolean drawnPainter;
-	private int uniPainterPass;
+	private int uniPainterPass, uniPainterBand, uniPainterDepth;
 	// the hide switches (diagnostics), read once a frame: RuneLite's config proxy is slow to read for every one of the
 	// tens of thousands of objects a frame hands over (11/18/2026)
 	// the client's zoom and clip edges for isVisible, read at its first object each frame (they don't change mid-frame)
@@ -910,6 +916,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		uniGroundPass = GL43C.glGetUniformLocation(glProgram, "groundPass");
 		uniAlphaPass = GL43C.glGetUniformLocation(glProgram, "alphaPass");
 		uniPainterPass = GL43C.glGetUniformLocation(glProgram, "painterPass");
+		uniPainterBand = GL43C.glGetUniformLocation(glProgram, "painterBand");
+		uniPainterDepth = GL43C.glGetUniformLocation(glProgram, "painterDepth");
 		uniGroundAllowance = GL43C.glGetUniformLocation(glProgram, "groundAllowance");
 		uniPalette = GL43C.glGetUniformLocation(glProgram, "palette");
 		uniTick = GL43C.glGetUniformLocation(glProgram, "tick");
@@ -1580,6 +1588,24 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			throw new RuntimeException("CPU look FBO is incomplete. status: " + status);
 		}
+		// "Both fixed"'s scratch: depth only
+		texPainterDepth = GL43C.glGenTextures();
+		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, texPainterDepth);
+		GL43C.glTexImage2D(GL43C.GL_TEXTURE_2D, 0, GL43C.GL_DEPTH_COMPONENT32F, width, height, 0, GL43C.GL_DEPTH_COMPONENT, GL43C.GL_FLOAT, 0);
+		GL43C.glTexParameteri(GL43C.GL_TEXTURE_2D, GL43C.GL_TEXTURE_MIN_FILTER, GL43C.GL_NEAREST);
+		GL43C.glTexParameteri(GL43C.GL_TEXTURE_2D, GL43C.GL_TEXTURE_MAG_FILTER, GL43C.GL_NEAREST);
+		GL43C.glTexParameteri(GL43C.GL_TEXTURE_2D, GL43C.GL_TEXTURE_COMPARE_MODE, GL43C.GL_NONE);
+		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, 0);
+		fboPainter = GL43C.glGenFramebuffers();
+		GL43C.glBindFramebuffer(GL43C.GL_FRAMEBUFFER, fboPainter);
+		GL43C.glFramebufferTexture2D(GL43C.GL_FRAMEBUFFER, GL43C.GL_DEPTH_ATTACHMENT, GL43C.GL_TEXTURE_2D, texPainterDepth, 0);
+		GL43C.glDrawBuffer(GL43C.GL_NONE);
+		GL43C.glReadBuffer(GL43C.GL_NONE);
+		status = GL43C.glCheckFramebufferStatus(GL43C.GL_FRAMEBUFFER);
+		if (status != GL43C.GL_FRAMEBUFFER_COMPLETE)
+		{
+			throw new RuntimeException("CPU look's players' depth FBO is incomplete. status: " + status);
+		}
 		GL43C.glBindFramebuffer(GL43C.GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
 
 		lastCpuWidth = width;
@@ -1597,6 +1623,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			GL43C.glDeleteTextures(texCpu);
 			texCpu = -1;
+		}
+		if (fboPainter != -1)
+		{
+			GL43C.glDeleteFramebuffers(fboPainter);
+			fboPainter = -1;
+		}
+		if (texPainterDepth != -1)
+		{
+			GL43C.glDeleteTextures(texPainterDepth);
+			texPainterDepth = -1;
 		}
 		if (rboCpuDepth != -1)
 		{
@@ -1715,7 +1751,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		calls = 0;
 		// (the developer's diagnostics: never on in the Plugin Hub's build, Build.java)
 		groundHides = Build.DEVELOPER && config.groundHides() && !config.depthBuffer() && !config.cpuDepthTest();
-		painterModels = !config.playersByDepth();
+		final CpuLookConfig.PlayerFaces faces = config.playerFaces();
+		painterModels = faces != CpuLookConfig.PlayerFaces.DEPTH;
+		painterBand = faces == CpuLookConfig.PlayerFaces.BOTH ? Math.max(1, Math.min(64, config.playerFacesBand())) : 0;
 		orderTest = Build.DEVELOPER && config.cpuOrderTest();
 		frameScene = client.getTopLevelWorldView().getScene();
 		this.cameraPitch = pitch * Perspective.UNIT14;
@@ -3203,14 +3241,42 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		GL43C.glUniform1i(uniAlphaPass, 1);
 		GL43C.glUniform1i(uniPainterPass, 2);
+		final boolean band = painterBand > 0 && fboPainter != -1;
+		if (band)
+		{
+			GL43C.glUniform1i(uniPainterDepth, 4);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE4);
+			GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, texPainterDepth);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
+		}
 		for (int i = 0; i < painterRanges; i++)
 		{
+			if (band)
+			{
+				// "Both fixed" (not the CPU's look): the model's own greatest key at each pixel, drawn alone first
+				GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboPainter);
+				GL43C.glDepthMask(true);
+				GL43C.glClear(GL43C.GL_DEPTH_BUFFER_BIT);
+				GL43C.glDrawArrays(GL43C.GL_TRIANGLES, painterFirst[i], painterCount[i]);
+				GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboCpu);
+				GL43C.glUniform1f(uniPainterBand, (float) painterBand);
+			}
 			GL43C.glDepthMask(false);
 			GL43C.glDrawArrays(GL43C.GL_TRIANGLES, painterFirst[i], painterCount[i]);
+			if (band)
+			{
+				GL43C.glUniform1f(uniPainterBand, 0f);
+			}
 			GL43C.glColorMask(false, false, false, false);
 			GL43C.glDepthMask(true);
 			GL43C.glDrawArrays(GL43C.GL_TRIANGLES, painterFirst[i], painterCount[i]);
 			GL43C.glColorMask(true, true, true, true);
+		}
+		if (band)
+		{
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE4);
+			GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, 0);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
 		}
 		GL43C.glUniform1i(uniPainterPass, 0);
 	}
@@ -3245,43 +3311,55 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		final FastOrder fo = fastOrder;
 		final int n = fo.n;
-		final IdentityHashMap<Object, Integer> head = new IdentityHashMap<>();
+		// the walk's entries by their object's hash (unique to an object: a model can be shared between objects, so
+		// the renderable alone doesn't say which object it is), linked
+		final java.util.HashMap<Long, Integer> head = new java.util.HashMap<>();
 		final int[] next = new int[n];
+		final long[] hashes = new long[n];
 		final boolean[] claimed = new boolean[n];
+		final int[] p = new int[4];
 		int walkDraws = 0;
 		for (int k = n - 1; k >= 0; k--)
 		{
+			next[k] = -1;
 			if (fo.kkind[k] == FastOrder.K_GROUND)
 			{
-				next[k] = -1;
 				continue;
 			}
 			walkDraws++;
-			Integer h = head.put(fo.keys[k], k);
+			hashes[k] = fo.draw(k, p);
+			Integer h = head.put(hashes[k], k);
 			next[k] = h != null ? h : -1;
 		}
-		final int[] p = new int[4];
-		int same = 0, dO = 0, dX = 0, dY = 0, dZ = 0, dH = 0, clientOnly = 0, walkOnly = 0;
-		String exDiff = null, exClient = null, exWalk = null;
+		int same = 0, dO = 0, dX = 0, dY = 0, dZ = 0, otherRenderable = 0, clientOnly = 0, walkOnly = 0;
+		String exDiff = null, exOther = null, exClient = null, exWalk = null;
+		final java.util.TreeMap<String, Integer> clientKinds = new java.util.TreeMap<>(), walkKinds = new java.util.TreeMap<>();
 		for (int i = 0; i < calls; i++)
 		{
-			Integer h = head.get(callR[i]);
-			int match = -1, first = -1;
+			Integer h = head.get(callH[i]);
+			int match = -1, sameR = -1, any = -1;
 			for (int k = h != null ? h : -1; k >= 0; k = next[k])
 			{
 				if (claimed[k])
 				{
 					continue;
 				}
-				if (first < 0)
+				if (any < 0)
 				{
-					first = k;
+					any = k;
 				}
-				long hash = fo.draw(k, p);
-				if (p[0] == callO[i] && p[1] == callX[i] && p[2] == callY[i] && p[3] == callZ[i] && hash == callH[i])
+				if (fo.keys[k] == callR[i])
 				{
-					match = k;
-					break;
+					fo.draw(k, p);
+					if (p[0] == callO[i] && p[1] == callX[i] && p[2] == callY[i] && p[3] == callZ[i])
+					{
+						match = k;
+						break;
+					}
+					if (sameR < 0)
+					{
+						sameR = k;
+					}
 				}
 			}
 			if (match >= 0)
@@ -3290,28 +3368,39 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				same++;
 				continue;
 			}
-			if (first < 0)
+			String what = callR[i] == null ? "nothing" : callR[i].getClass().getSimpleName();
+			if (sameR >= 0)
 			{
-				clientOnly++;
-				if (exClient == null)
+				claimed[sameR] = true;
+				fo.draw(sameR, p);
+				dO += p[0] != callO[i] ? 1 : 0;
+				dX += p[1] != callX[i] ? 1 : 0;
+				dY += p[2] != callY[i] ? 1 : 0;
+				dZ += p[3] != callZ[i] ? 1 : 0;
+				if (exDiff == null)
 				{
-					exClient = String.format("%s turned %d at %d %d %d, hash %x", callR[i] == null ? "nothing" : callR[i].getClass().getSimpleName(),
-						callO[i], callX[i], callY[i], callZ[i], callH[i]);
+					exDiff = String.format("%s (kind %d): handed over turned %d at %d %d %d, the walk's turned %d at %d %d %d",
+						what, fo.kkind[sameR], callO[i], callX[i], callY[i], callZ[i], p[0], p[1], p[2], p[3]);
 				}
 				continue;
 			}
-			claimed[first] = true;
-			long hash = fo.draw(first, p);
-			dO += p[0] != callO[i] ? 1 : 0;
-			dX += p[1] != callX[i] ? 1 : 0;
-			dY += p[2] != callY[i] ? 1 : 0;
-			dZ += p[3] != callZ[i] ? 1 : 0;
-			dH += hash != callH[i] ? 1 : 0;
-			if (exDiff == null)
+			if (any >= 0)
 			{
-				exDiff = String.format("%s (kind %d): handed over turned %d at %d %d %d hash %x, the walk's turned %d at %d %d %d hash %x",
-					callR[i].getClass().getSimpleName(), fo.kkind[first], callO[i], callX[i], callY[i], callZ[i], callH[i],
-					p[0], p[1], p[2], p[3], hash);
+				// the same object, another renderable (the client handed over a different one for it)
+				claimed[any] = true;
+				otherRenderable++;
+				if (exOther == null)
+				{
+					exOther = String.format("hash %x: handed over %s, the walk's %s (kind %d)", callH[i], what,
+						fo.keys[any].getClass().getSimpleName(), fo.kkind[any]);
+				}
+				continue;
+			}
+			clientOnly++;
+			clientKinds.merge(what, 1, Integer::sum);
+			if (exClient == null)
+			{
+				exClient = String.format("%s turned %d at %d %d %d, hash %x", what, callO[i], callX[i], callY[i], callZ[i], callH[i]);
 			}
 		}
 		for (int k = 0; k < n; k++)
@@ -3319,11 +3408,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			if (fo.kkind[k] != FastOrder.K_GROUND && !claimed[k])
 			{
 				walkOnly++;
+				String what = fo.keys[k].getClass().getSimpleName() + " kind " + fo.kkind[k];
+				walkKinds.merge(what, 1, Integer::sum);
 				if (exWalk == null)
 				{
-					long hash = fo.draw(k, p);
-					exWalk = String.format("%s (kind %d) turned %d at %d %d %d, hash %x", fo.keys[k].getClass().getSimpleName(),
-						fo.kkind[k], p[0], p[1], p[2], p[3], hash);
+					fo.draw(k, p);
+					exWalk = String.format("%s turned %d at %d %d %d, hash %x", what, p[0], p[1], p[2], p[3], hashes[k]);
 				}
 			}
 		}
@@ -3331,8 +3421,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (now - lastFullCheckLog > 5_000_000_000L)
 		{
 			lastFullCheckLog = now;
-			log.info("Bitcrush zone-mode check (B1): {} draws handed over, {} in the walk; the same in full {}; differing in turn {}, x {}, height {}, z {}, hash {} (first: {}); the client's alone {} (first: {}); the walk's alone {} (first: {})",
-				calls, walkDraws, same, dO, dX, dY, dZ, dH, exDiff, clientOnly, exClient, walkOnly, exWalk);
+			log.info("Bitcrush zone-mode check (B1, by hash): {} draws handed over, {} in the walk; the same in full {}; the same object and renderable but differing in turn {}, x {}, height {}, z {} (first: {}); the same object, another renderable {} (first: {}); the client's alone {} {} (first: {}); the walk's alone {} {} (first: {})",
+				calls, walkDraws, same, dO, dX, dY, dZ, exDiff, otherRenderable, exOther, clientOnly, clientKinds, exClient,
+				walkOnly, walkKinds, exWalk);
 		}
 	}
 

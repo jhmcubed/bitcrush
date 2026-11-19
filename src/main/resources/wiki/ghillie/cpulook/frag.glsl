@@ -61,6 +61,18 @@ uniform int tick;
 // is kept between them. (Stage A4, 11/18/2026, kept each pixel's solid winner and dropped a see-through face handed
 // over before it, as a CPU drawing in one pass would; the client's doesn't.)
 
+// "Players' own faces: Both fixed" (11/19/2026, Bitcrush's own, not the CPU's look; claude/cpu-look.md, section 9): a
+// render mode 2 model's colour pass keeps a face only where it lies within painterBand game units of the model's own
+// nearest face at that pixel (its greatest key, drawn alone into painterDepth just before, in the same encoding as
+// gl_FragDepth below); 0 off
+uniform float painterBand;
+uniform sampler2D painterDepth;
+
+// a key's camera depth (the key's formula turned round; the face's bias still in it)
+float keyDepth(float k) {
+  return 150.75377 / ((k - 1.0100503) * 1.0100503) + 75.0;
+}
+
 // fog (11/18/2026, Jace: "I like my max draw distance being softened by fog rather than a hard cut"): the GPU plugin's,
 // not the CPU's (which has none); 0 tiles is off, the CPU renderer's hard edge
 uniform int fogDepth;        // in tiles
@@ -160,6 +172,10 @@ void main() {
     // which no corner beyond z = 75 has, share the end)
     precise float key = fKey.x + fKey.z * float(py - int(fKey.w)) + fKey.y * float(px);
     if (!(key > 0.0)) discard;
+    if (painterBand > 0.0) {
+      uint stored = floatBitsToUint(texelFetch(painterDepth, ivec2(gl_FragCoord.xy), 0).r) + 0x3B000000u;
+      if (keyDepth(key) > keyDepth(uintBitsToFloat(stored)) + painterBand) discard;
+    }
     uint kb = clamp(floatBitsToUint(key), 0x3B800000u, 0x5B7FFFFFu) - 0x3B000000u;
     gl_FragDepth = uintBitsToFloat(kb);
   } else if ((cpuFlags & 8) != 0 || groundPass == 1) {

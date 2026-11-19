@@ -357,7 +357,7 @@ public interface CpuLookConfig extends Config
 	@ConfigItem(
 		keyName = "painterBatches",
 		name = "Players and NPCs in batches",
-		description = "Render mode 2 models (players, most NPCs) whose screen boxes don't overlap drawn together, two draws a batch instead of two a model; the same pixels. Off: one model at a time, as before (to compare).",
+		description = "Render mode 2 models (players, most NPCs) whose screen boxes don't overlap drawn together: two draws a batch instead of two a model, and with Players' own faces on Both fixed one clear and three draws a batch instead of a model; the same pixels. Off: one model at a time, as before (to compare).",
 		position = 51,
 		section = diagnostics,
 		hidden = !Build.DEVELOPER

@@ -2207,7 +2207,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 5, sceneUvBuffer.glBufferId);
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 6, tmpUvBuffer.glBufferId);
 
-		GL43C.glDispatchCompute(largeModels, 1, 1);
+		// (an empty tier isn't dispatched, as dispatchTier doesn't: his GPU Traces had this one at 0.18-0.19 ms with no
+		// models, the card waiting for itself)
+		if (largeModels > 0)
+		{
+			GL43C.glDispatchCompute(largeModels, 1, 1);
+		}
 		passEnd();
 
 		if (timing)
@@ -4827,9 +4832,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUniform1i(uniAlphaPass, 1);
 		GL43C.glUniform1i(uniPainterPass, 2);
 		final boolean band = painterBand > 0 && fboPainter != -1;
-		if (!band && (!Build.DEVELOPER || config.painterBatches()))
+		if (!Build.DEVELOPER || config.painterBatches())
 		{
-			drawPainterBatches();
+			drawPainterBatches(band);
 			GL43C.glUniform1i(uniPainterPass, 0);
 			return;
 		}
@@ -4874,11 +4879,20 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	// Render mode 2 models in batches (11/19/2026): each model's colour then its keys (drawPainters), but the models whose
 	// screen boxes don't overlap any earlier one's in the batch drawn together, a multi-draw for the colour and one for
-	// the keys, instead of two draws a model, each of which the card waited on (his GPU Trace: 84 draws, 82 waits, 0.87
-	// ms at the GE). Models that share no pixels can't affect each other, and a model comes in a later batch than every
+	// the keys instead of two draws a model; with "Both fixed" also one clear of the scratch target and one draw into it
+	// a batch, not a model (his GPU Trace 1, taken with Both fixed: 84 draws and 82 waits for the card at the GE, 0.87
+	// ms; As the CPU's two draws a model cost about the same either way, run 8). Models that share no pixels can't
+	// affect each other, nor each other's keys in the scratch target, and a model comes in a later batch than every
 	// earlier model it overlaps (PainterBatch.layers), so every pixel is what the one-at-a-time drawing gives.
-	private void drawPainterBatches()
+	private void drawPainterBatches(boolean band)
 	{
+		if (band)
+		{
+			GL43C.glUniform1i(uniPainterDepth, 4);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE4);
+			GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, texPainterDepth);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
+		}
 		final int n = painterRanges;
 		final int batches = painterBatch.layers(n, painterX, painterY, painterZ, painterM, painterY0, painterY1, viewportWidth, viewportHeight);
 		if (painterFirstBuf.capacity() < n)
@@ -4901,12 +4915,32 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 			painterFirstBuf.flip();
 			painterCountBuf.flip();
+			if (band)
+			{
+				// "Both fixed": each model's own greatest key at each pixel, the batch's models alone together
+				GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboPainter);
+				GL43C.glDepthMask(true);
+				GL43C.glClear(GL43C.GL_DEPTH_BUFFER_BIT);
+				GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, painterFirstBuf, painterCountBuf);
+				GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboCpu);
+				GL43C.glUniform1f(uniPainterBand, (float) painterBand);
+			}
 			GL43C.glDepthMask(false);
 			GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, painterFirstBuf, painterCountBuf);
+			if (band)
+			{
+				GL43C.glUniform1f(uniPainterBand, 0f);
+			}
 			GL43C.glColorMask(false, false, false, false);
 			GL43C.glDepthMask(true);
 			GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, painterFirstBuf, painterCountBuf);
 			GL43C.glColorMask(true, true, true, true);
+		}
+		if (band)
+		{
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE4);
+			GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, 0);
+			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
 		}
 		if (timing)
 		{

@@ -451,6 +451,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int zoneThreads;
 	// drawScene's plane: the highest render level the client draws this frame
 	private int framePlane;
+	// the developer build's count of why zone mode left tiles out (level, hidden roof, frustum, in view), logged every
+	// five seconds with Log frame timings on
+	private final int[] zoneWhy = new int[4];
+	private boolean zoneWhyNext;
+	private long lastZoneWhyLog;
 	private volatile boolean zoneFrame;
 	// the "Zone mode: draw nothing" measurement, read once a frame
 	private volatile boolean zoneIdle;
@@ -3012,6 +3017,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int cx = frameCamX, cy = frameCamY, cz = frameCamZ;
 		// which tiles the client would draw: its render level within the levels shown, a hidden roof's tiles left out,
 		// and the frustum (the old mode's tileInFrustum)
+		final boolean count = Build.DEVELOPER && timing;
+		final int[] why = zoneWhy;
+		if (count)
+		{
+			java.util.Arrays.fill(why, 0);
+		}
 		final CpuOrder.Visible visible = (p, x, y) ->
 		{
 			Tile t = tiles[p][x][y];
@@ -3023,6 +3034,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			int rl = settings != null && (settings[p][x][y] & 8) != 0 ? 0 : p;
 			if (rl > maxLevel)
 			{
+				if (count)
+				{
+					why[0]++;
+				}
 				return false;
 			}
 			if (roofRemoval && level < rl && roofs != null)
@@ -3030,14 +3045,27 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				int roof = roofs[level][x][y];
 				if (roof != 0 && hide.contains(roof))
 				{
+					if (count)
+					{
+						why[1]++;
+					}
 					return false;
 				}
 			}
-			return x > 0 && y > 0 && x < Constants.EXTENDED_SCENE_SIZE - 1 && y < Constants.EXTENDED_SCENE_SIZE - 1
+			boolean in = x > 0 && y > 0 && x < Constants.EXTENDED_SCENE_SIZE - 1 && y < Constants.EXTENDED_SCENE_SIZE - 1
 				&& inFrustum(scene, ps, pc, ys, yc, cx, cy, cz, p, x, y);
+			if (count)
+			{
+				why[in ? 3 : 2]++;
+			}
+			return in;
 		};
 		final int distance = getDrawDistance();
 		final long t0 = timing ? System.nanoTime() : 0;
+		if (count && System.nanoTime() - lastZoneWhyLog > 5_000_000_000L)
+		{
+			zoneWhyNext = true;
+		}
 		fastOrder.setTemps(tempG, temps);
 		fastOrder.build(scene, cx, cz, distance, visible);
 		fastOrder.setTemps(null, 0);
@@ -3052,6 +3080,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			timer.order(System.nanoTime() - t0, reference ? cpuOrder.n : fastOrder.n, fastOrder.readNs,
 				fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
+		}
+		if (zoneWhyNext)
+		{
+			zoneWhyNext = false;
+			lastZoneWhyLog = System.nanoTime();
+			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}",
+				scene.getMinLevel(), level, maxLevel, scene.getRoofRemovalMode(), hide, framePlane,
+				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3]);
 		}
 		if (reference)
 		{

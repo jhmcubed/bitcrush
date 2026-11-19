@@ -3454,6 +3454,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				recsKey = key;
 			}
 		}
+		lookAtEmpty();
 		fastOrder.setTemps(tempG, temps);
 		fastOrder.setItems(itemLayers, nItemLayers);
 		// (entries with a prepared draw noted by it alone, unless a check or diagnostic needs every entry in full)
@@ -3911,7 +3912,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			final net.runelite.api.DynamicObject d = (net.runelite.api.DynamicObject) key;
 			final Model still = d.getModelZbuf();
-			if (still == null || still.getSceneId() == sceneId)
+			if (still == null)
+			{
+				// nothing at rest (zoneEntry draws nothing for it unless the client hands it over moving): a record that
+				// draws nothing but what's handed over (11/19/2026: a ground decoration of this kind at the GE stopped
+				// zone mode's own thread every frame); kept to look at again, in case a model comes for it later
+				return prepareEmpty(scene, key, src, kind, params, out, at, keep, d);
+			}
+			if (still.getSceneId() == sceneId)
 			{
 				return false;
 			}
@@ -3961,6 +3969,73 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at + 10] = RB_MODEL | (see ? RB_SEE : 0) | (painter ? RB_PAINTER : 0) | (shown ? 0 : RB_NONE);
 		out[at + 11] = 0;
 		return true;
+	}
+
+	// an animated object with no model at rest: drawn only when the client hands it over (drawPushed with no copy)
+	private boolean prepareEmpty(Scene scene, Object key, Object src, byte kind, int[] params, int[] out, int at, boolean keep,
+		net.runelite.api.DynamicObject d)
+	{
+		FastOrder.draw(key, src, kind, params);
+		if (params[0] < 0)
+		{
+			return false;
+		}
+		int data = -1;
+		if (keep)
+		{
+			if (nRecData == recVerts.length)
+			{
+				int c = nRecData * 2;
+				recVerts = Arrays.copyOf(recVerts, c);
+				recUvs = Arrays.copyOf(recUvs, c);
+				recKeys = Arrays.copyOf(recKeys, c);
+			}
+			data = nRecData++;
+			recVerts[data] = null;
+			recUvs[data] = null;
+			recKeys[data] = d;
+			// its zone, to read again if a model at rest comes for it
+			emptyObjects.add(d);
+			emptyZones.add(((params[1] >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET) >> 3 << 16
+				| ((params[3] >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET) >> 3);
+		}
+		else
+		{
+			checkVerts = null;
+			checkUvs = null;
+		}
+		Arrays.fill(out, at, at + REC, 0);
+		out[at + 4] = params[1];
+		out[at + 5] = params[2];
+		out[at + 6] = params[3];
+		out[at + 10] = RB_PUSHED;
+		out[at + 11] = data;
+		return true;
+	}
+
+	// animated objects prepared with no model at rest, and their zones (x << 16 | z): looked at again now and then
+	private final java.util.ArrayList<net.runelite.api.DynamicObject> emptyObjects = new java.util.ArrayList<>();
+	private final java.util.ArrayList<Integer> emptyZones = new java.util.ArrayList<>();
+	private int emptyLook;
+
+	// (the client's thread, every 30th frame) any of them with a model at rest now: its zone read again, its record made
+	// again with the model
+	private void lookAtEmpty()
+	{
+		if (emptyObjects.isEmpty() || ++emptyLook % 30 != 0)
+		{
+			return;
+		}
+		for (int i = emptyObjects.size() - 1; i >= 0; i--)
+		{
+			if (emptyObjects.get(i).getModelZbuf() != null)
+			{
+				final int zone = emptyZones.get(i);
+				fastOrder.invalidate(zone >>> 16, zone & 0xFFFF);
+				emptyObjects.remove(i);
+				emptyZones.remove(i);
+			}
+		}
 	}
 
 	// a record whose model is copied now: drawRenderable's temporary branch for d drawn with the model still (an at-rest
@@ -4147,6 +4222,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		final int len = R[b];
 		final int[] verts = recVerts[d];
+		if (verts == null)
+		{
+			// no model at rest (prepareEmpty): nothing, as zoneEntry
+			return;
+		}
 		vertexBuffer.ensureCapacity(verts.length);
 		vertexBuffer.getBuffer().put(verts);
 		int uvAt = -1;
@@ -4230,6 +4310,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// the at-rest objects' copied numbers dropped with the records
 	private void dropRecData()
 	{
+		emptyObjects.clear();
+		emptyZones.clear();
 		Arrays.fill(recVerts, 0, nRecData, null);
 		Arrays.fill(recUvs, 0, nRecData, null);
 		Arrays.fill(recKeys, 0, nRecData, null);

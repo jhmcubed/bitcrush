@@ -88,6 +88,11 @@ final class FastOrder
 	// each slot's state for this frame's walls, apart from st so a frame clears it cheaply (zone mode keeps st from
 	// frame to frame): the held edges (bits 0-3), edge A (4-7), edge B (8-11), the later walls (12-19)
 	private final int[] pf = new int[ALL];
+	// what the sweep reads from nearly every tile, apart in compact arrays (11/19/2026: in st, two cache lines a tile,
+	// the sweep spent most of its time waiting on memory): its number of objects, their mask, what it has, its ground
+	// (paint or shaped model), its ground decoration's place, renderable and object
+	private final int[] nobj = new int[ALL], tmask = new int[ALL], hs = new int[ALL], gx = new int[ALL], gy = new int[ALL];
+	private final Object[] groundAt = new Object[ALL], gRen = new Object[ALL], gObj = new Object[ALL];
 	// HAS: what the tile has
 	private static final int H_WALL = 1, H_DECOR = 2, H_ITEMS = 4, H_BRIDGE = 8, H_GROUND = 16, H_GOBJ = 32;
 	// the tile's renderables (and its bridge), read in the setup
@@ -210,7 +215,7 @@ final class FastOrder
 
 	private boolean putObject(int o, int i, int x, int y)
 	{
-		int k = st[i * STRIDE + NOBJ];
+		int k = nobj[i];
 		for (int j = 0; j < k; j++)
 		{
 			if (st[i * STRIDE + OBJ + j] == o)
@@ -223,8 +228,8 @@ final class FastOrder
 			return false;
 		}
 		st[i * STRIDE + OBJ + k] = o;
-		st[i * STRIDE + NOBJ] = k + 1;
-		st[i * STRIDE + MASK] |= mask(o, x, y);
+		nobj[i] = k + 1;
+		tmask[i] |= mask(o, x, y);
 		return true;
 	}
 
@@ -234,8 +239,10 @@ final class FastOrder
 	// draw in full is worked out from them (draw), as the client's tile draw hands it over (stage B, B1)
 	Object[] ksrc = new Object[8192];
 	byte[] kkind = new byte[8192];
-	int[] kref = new int[8192];
+	int[] kref = new int[8192], krec = new int[8192];
 	int n;
+	// the plugin's choice for the frame (zone mode's prepared draws, no check or diagnostic needing every entry in full)
+	boolean lean;
 
 	static final byte K_GROUND = 0, K_WALL1 = 1, K_WALL2 = 2, K_DECOR1 = 3, K_DECOR2 = 4, K_GOBJ = 5, K_ITEM = 6, K_OBJ = 7;
 
@@ -337,6 +344,12 @@ final class FastOrder
 	 */
 	void buildCached(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible)
 	{
+		buildCached(scene, cameraX, cameraZ, drawDistance, visible, null);
+	}
+
+	// frustum: zone mode's own test of which tiles are in view (viewZone), in place of visible
+	void buildCached(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible, Frustum frustum)
+	{
 		final long t0 = System.nanoTime();
 		Tile[][][] tiles = begin(scene, cameraX, cameraZ, drawDistance);
 		if (tiles == null)
@@ -367,7 +380,14 @@ final class FastOrder
 		}
 		putItems();
 		readNs = System.nanoTime() - t0;
-		view(scene, visible);
+		if (frustum != null)
+		{
+			viewZone(frustum);
+		}
+		else
+		{
+			view(scene, visible);
+		}
 		setupNs = System.nanoTime() - t0;
 		final long t1 = System.nanoTime();
 		sweep(minLevel, radius);
@@ -435,7 +455,7 @@ final class FastOrder
 						fl[i] = EXISTS;
 						continue;
 					}
-					fl[i] = EXISTS | PRIMARY | SECONDARY | (st[i * STRIDE + NOBJ] > 0 ? LEFT : 0);
+					fl[i] = EXISTS | PRIMARY | SECONDARY | (nobj[i] > 0 ? LEFT : 0);
 					planeUsed[p] = true;
 					pending++;
 				}
@@ -443,9 +463,125 @@ final class FastOrder
 		}
 	}
 
+	/**
+	 * Zone mode's frame's view: CpuLookPlugin's tile test (its level by the client's rule, a hidden roof's tiles, and
+	 * the frustum as the GPU plugin's tileInFrustum has it), the same arithmetic, from each tile's level and corner
+	 * height worked out when it was read (lvl, top) and the frame's camera and screen read once (11/19/2026: the test
+	 * was 0.68 ms a frame zoomed out, most of it reading the scene's arrays and the client's screen numbers per tile).
+	 */
+	static final class Frustum
+	{
+		float pitchSin, pitchCos, yawSin, yawCos;
+		int camX, camY, camZ, zoom, clipMidX2, clipNegMidX, clipNegMidY;
+		// the client's levels (preSceneDraw): the player's, the highest drawn; roof removal and the roofs it hides
+		int level, maxLevel;
+		boolean roofRemoval;
+		int[][][] roofs;
+		java.util.Set<Integer> hide;
+		// the developer log's counts: left out by their level, by a hidden roof, by the frustum; in view
+		boolean count;
+		final int[] why = new int[4];
+	}
+
+	private void viewZone(Frustum f)
+	{
+		if (f.count)
+		{
+			Arrays.fill(f.why, 0);
+		}
+		for (int p = 0; p < 4; p++)
+		{
+			for (int x = xmin; x < xmax; x++)
+			{
+				int i = (p * SIZE + x) * SIZE + ymin;
+				for (int y = ymin; y < ymax; y++, i++)
+				{
+					if (tileAt[i] == null)
+					{
+						fl[i] = 0;
+						continue;
+					}
+					pf[i] = 0;
+					if (p < minLevel || !inView(f, i, x, y))
+					{
+						fl[i] = EXISTS;
+						continue;
+					}
+					fl[i] = EXISTS | PRIMARY | SECONDARY | (nobj[i] > 0 ? LEFT : 0);
+					planeUsed[p] = true;
+					pending++;
+				}
+			}
+		}
+	}
+
+	private boolean inView(Frustum f, int i, int x, int y)
+	{
+		final int rl = lvl[i];
+		if (rl > f.maxLevel && !f.roofRemoval)
+		{
+			if (f.count)
+			{
+				f.why[0]++;
+			}
+			return false;
+		}
+		if (f.roofRemoval && f.level < rl && f.roofs != null)
+		{
+			int roof = f.roofs[f.level][x][y];
+			if (roof != 0 && f.hide.contains(roof))
+			{
+				if (f.count)
+				{
+					f.why[1]++;
+				}
+				return false;
+			}
+		}
+		final boolean in = x > 0 && y > 0 && x < SIZE - 1 && y < SIZE - 1 && frustum(f, x, y, top[i]);
+		if (f.count)
+		{
+			f.why[in ? 3 : 2]++;
+		}
+		return in;
+	}
+
+	// CpuLookPlugin.inFrustum's arithmetic, exactly (top: the tile's highest corner plus GROUND_MIN_Y)
+	private static boolean frustum(Frustum f, int msx, int msy, int top)
+	{
+		final int x = ((msx - OFFSET) << 7) + 64 - f.camX;
+		final int z = ((msy - OFFSET) << 7) + 64 - f.camZ;
+		final int y = top - f.camY;
+		final int radius = 96;
+		float var11 = f.yawCos * z - f.yawSin * x;
+		float var12 = f.pitchSin * y + f.pitchCos * var11;
+		float var13 = f.pitchCos * radius;
+		float depth = var12 + var13;
+		if (depth > 50)
+		{
+			float rx = z * f.yawSin + f.yawCos * x;
+			float var16 = (rx - radius) * f.zoom;
+			float var17 = (rx + radius) * f.zoom;
+			if (var16 < f.clipMidX2 * depth && var17 > f.clipNegMidX * depth)
+			{
+				float ry = f.pitchCos * y - var11 * f.pitchSin;
+				float ybottom = f.pitchSin * radius;
+				float var20 = (ry + ybottom) * f.zoom;
+				return var20 > f.clipNegMidY * depth;
+			}
+		}
+		return false;
+	}
+
 	// ---- zone mode: the scene kept from frame to frame ----
 
 	private Scene cached;
+	// each tile's level for which tiles are drawn (CpuLookPlugin.drawLevel) and its highest corner plus GROUND_MIN_Y (the
+	// frustum test's height), from the scene's settings and heights when the tile is read
+	private final byte[] lvl = new byte[ALL];
+	private final int[] top = new int[ALL];
+	private byte[][][] settings;
+	private int[][][] heights;
 	// the objects read from the scene (the first nStatic of the objects' arrays; this frame's temporary ones after them)
 	private int nStatic;
 	private final IdentityHashMap<GameObject, Integer> objIndex = new IdentityHashMap<>();
@@ -471,7 +607,7 @@ final class FastOrder
 	boolean fullRead;
 
 	/**
-	 * Prepared draws (zone mode, kept by the plugin): for each tile slot and role (ROLES a slot), and for each object read
+	 * Prepared draws (zone mode, kept by the plugin): for each tile slot and role (role * ALL + slot), and for each object read
 	 * from the scene, the index of the plugin's record for its draw, -1 for none yet (-2: not one to prepare). Cleared
 	 * where the scene is read again. records counts the times every one was cleared (a new scene).
 	 */
@@ -552,6 +688,8 @@ final class FastOrder
 	private void readScene(Scene scene, Tile[][][] tiles)
 	{
 		cached = scene;
+		settings = scene.getExtendedTileSettings();
+		heights = scene.getTileHeights();
 		nObj = nStatic = 0;
 		objIndex.clear();
 		Arrays.fill(overflow, false);
@@ -628,7 +766,7 @@ final class FastOrder
 		{
 			return;
 		}
-		for (int k = 0, nk = st[i * STRIDE + NOBJ]; k < nk; k++)
+		for (int k = 0, nk = nobj[i]; k < nk; k++)
 		{
 			int o = st[i * STRIDE + OBJ + k];
 			for (int fx = Math.max(0, oSx[o]); fx <= Math.min(SIZE - 1, oEx[o]); fx++)
@@ -649,14 +787,21 @@ final class FastOrder
 		Tile[] column = plane != null && x < plane.length ? plane[x] : null;
 		Tile tile = column != null && y < column.length ? column[y] : null;
 		tileAt[i] = tile;
-		Arrays.fill(tileRec, i * ROLES, i * ROLES + ROLES, -1);
+		for (int role = 0; role < ROLES; role++)
+		{
+			tileRec[role * ALL + i] = -1;
+		}
+		lvl[i] = (byte) CpuLookPlugin.drawLevel(settings, p, x, y);
+		final int[][] h = heights != null && p < heights.length ? heights[p] : null;
+		top[i] = h != null && x > 0 && y > 0 && x < SIZE - 1 && y < SIZE - 1 && x + 1 < h.length && y + 1 < h[x + 1].length
+			? Math.max(Math.max(h[x][y], h[x][y + 1]), Math.max(h[x + 1][y], h[x + 1][y + 1])) + CpuLookPlugin.GROUND_MIN_Y : 0;
 		if (overflow[i])
 		{
 			overflow[i] = false;
 			overflowTiles--;
 		}
 		final int b = i * STRIDE;
-		st[b + MASK] = st[b + NOBJ] = 0;
+		tmask[i] = nobj[i] = 0;
 		if (tile == null)
 		{
 			fl[i] = 0;
@@ -733,7 +878,7 @@ final class FastOrder
 				continue;
 			}
 			final int i = (p * SIZE + x) * SIZE + y, b = i * STRIDE, r = i * RSTRIDE;
-			if (tileAt[i] == null || (st[b + HAS] & H_ITEMS) != 0)
+			if (tileAt[i] == null || (hs[i] & H_ITEMS) != 0)
 			{
 				continue;
 			}
@@ -743,9 +888,9 @@ final class FastOrder
 				itemHas = Arrays.copyOf(itemHas, nItemSlots * 2);
 			}
 			itemSlot[nItemSlots] = i;
-			itemHas[nItemSlots] = st[b + HAS];
+			itemHas[nItemSlots] = hs[i];
 			nItemSlots++;
-			st[b + HAS] |= H_ITEMS;
+			hs[i] |= H_ITEMS;
 			st[b + IH] = il.getHeight();
 			st[b + IX] = il.getX();
 			st[b + IY] = il.getY();
@@ -776,8 +921,8 @@ final class FastOrder
 				tempMask = Arrays.copyOf(tempMask, nTempSlots * 2);
 			}
 			tempSlot[nTempSlots] = i;
-			tempNobj[nTempSlots] = st[i * STRIDE + NOBJ];
-			tempMask[nTempSlots] = st[i * STRIDE + MASK];
+			tempNobj[nTempSlots] = nobj[i];
+			tempMask[nTempSlots] = tmask[i];
 			nTempSlots++;
 			final int p = i / PLANE, rem = i - p * PLANE, x = rem / SIZE, y = rem - x * SIZE;
 			for (int e = tempFirst[i]; e >= 0; e = tempNext[e])
@@ -810,15 +955,15 @@ final class FastOrder
 		for (int k = 0; k < nTempSlots; k++)
 		{
 			final int i = tempSlot[k];
-			st[i * STRIDE + NOBJ] = tempNobj[k];
-			st[i * STRIDE + MASK] = tempMask[k];
+			nobj[i] = tempNobj[k];
+			tmask[i] = tempMask[k];
 		}
 		nTempSlots = 0;
 		tempIndex.clear();
 		nObj = nStatic;
 		for (int k = 0; k < nItemSlots; k++)
 		{
-			st[itemSlot[k] * STRIDE + HAS] = itemHas[k];
+			hs[itemSlot[k]] = itemHas[k];
 		}
 		nItemSlots = 0;
 	}
@@ -843,7 +988,7 @@ final class FastOrder
 						continue;
 					}
 					final int b = i * STRIDE;
-					st[b + MASK] = st[b + NOBJ] = 0;
+					tmask[i] = nobj[i] = 0;
 					fl[i] = EXISTS;
 					GameObject[] gos = tile.getGameObjects();
 					if (gos != null)
@@ -940,7 +1085,7 @@ final class FastOrder
 		{
 			ground = tile.getSceneTileModel();
 		}
-		refs[r + R_GROUND] = ground;
+		groundAt[i] = ground;
 		if (ground != null)
 		{
 			has |= H_GROUND;
@@ -971,10 +1116,10 @@ final class FastOrder
 		if (g != null)
 		{
 			has |= H_GOBJ;
-			st[b + GX] = g.getX();
-			st[b + GY] = g.getY();
-			refs[r + R_G] = g.getRenderable();
-			refs[r + R_GOBJ] = g;
+			gx[i] = g.getX();
+			gy[i] = g.getY();
+			gRen[i] = g.getRenderable();
+			gObj[i] = g;
 		}
 		ItemLayer il = items ? tile.getItemLayer() : null;
 		if (il != null)
@@ -990,12 +1135,11 @@ final class FastOrder
 		}
 		Tile bridge = tile.getBridge();
 		refs[r + R_BRIDGE] = bridge;
-		refs[r + R_TILE] = tile;
 		if (bridge != null)
 		{
 			has |= H_BRIDGE;
 		}
-		st[b + HAS] = has;
+		hs[i] = has;
 	}
 
 	// the big object g seen on tile (p, x, y), slot i: the one already made for it this frame, or a new one
@@ -1010,7 +1154,7 @@ final class FastOrder
 		if (fx == x && fy == y)
 		{
 			// the footprint's first tile in the setup's order: made here (once, if the tile lists it twice)
-			for (int k = 0; k < st[i * STRIDE + NOBJ]; k++)
+			for (int k = 0; k < nobj[i]; k++)
 			{
 				int o = st[i * STRIDE + OBJ + k];
 				if (oG[o] == g)
@@ -1034,7 +1178,7 @@ final class FastOrder
 			int f = (p * SIZE + fx) * SIZE + fy;
 			if (fx >= xmin && fx < xmax && fy >= ymin && fy < ymax && (fl[f] & EXISTS) != 0)
 			{
-				for (int k = 0, nk = st[f * STRIDE + NOBJ]; k < nk; k++)
+				for (int k = 0, nk = nobj[f]; k < nk; k++)
 				{
 					int o = st[f * STRIDE + OBJ + k];
 					if (oG[o] == g)
@@ -1134,8 +1278,10 @@ final class FastOrder
 		return (x > oSx[o] ? 1 : 0) + (x < oEx[o] ? 4 : 0) + (y > oSy[o] ? 8 : 0) + (y < oEy[o] ? 2 : 0);
 	}
 
-	// ref: where the entry's prepared draw is kept (zone mode): a tile's slot and role (t * ROLES + role, 0 or more), a
-	// static object (-(o + 2)), or none (-1)
+	// ref: where the entry's prepared draw is kept (zone mode): a tile's slot and role (role * ALL + t, 0 or more), a
+	// static object (-(o + 2)), or none (-1). With lean on, an entry whose draw is prepared already is noted by that
+	// alone (krec), without the rest (11/19/2026: writing the six arrays, two of objects, was a tenth of the sweep);
+	// krec is -1 for the others
 	private void emit(Object key, int x, int z, Object src, byte kind, int ref)
 	{
 		if (key == null)
@@ -1150,7 +1296,19 @@ final class FastOrder
 			ksrc = Arrays.copyOf(ksrc, n * 2);
 			kkind = Arrays.copyOf(kkind, n * 2);
 			kref = Arrays.copyOf(kref, n * 2);
+			krec = Arrays.copyOf(krec, n * 2);
 		}
+		if (lean && ref != -1)
+		{
+			final int rec = ref >= 0 ? tileRec[ref] : oRec[-ref - 2];
+			if (rec >= 0)
+			{
+				krec[n] = rec;
+				n++;
+				return;
+			}
+		}
+		krec[n] = -1;
 		keys[n] = key;
 		kx[n] = x;
 		kz[n] = z;
@@ -1199,7 +1357,7 @@ final class FastOrder
 					{
 						continue;
 					}
-					final int mask = st[t * STRIDE + MASK];
+					final int mask = tmask[t];
 					if (x <= cx && x > xmin && blocks(t - SIZE, mask, 1)
 						|| x >= cx && x < xmax - 1 && blocks(t + SIZE, mask, 4)
 						|| y <= cy && y > ymin && blocks(t - 1, mask, 8)
@@ -1220,7 +1378,7 @@ final class FastOrder
 			{
 				boolean ok = true;
 				final int edges = pf[t] & 15, ea = pf[t] >> 4 & 15;
-				for (int k = 0, nk = st[t * STRIDE + NOBJ]; k < nk; k++)
+				for (int k = 0, nk = nobj[t]; k < nk; k++)
 				{
 					int o = st[t * STRIDE + OBJ + k];
 					if (oDrawn[o] != stamp && (mask(o, x, y) & edges) == ea)
@@ -1232,9 +1390,9 @@ final class FastOrder
 				if (ok)
 				{
 					final int b = t * STRIDE;
-					if ((st[b + HAS] & H_WALL) != 0)
+					if ((hs[t] & H_WALL) != 0)
 					{
-						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1, t * ROLES + R_W1);
+						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1, R_W1 * ALL + t);
 					}
 					pf[t] &= ~15;
 				}
@@ -1324,7 +1482,7 @@ final class FastOrder
 
 	private void first(int t, int p, int x, int y)
 	{
-		final int b = t * STRIDE, r = t * RSTRIDE, has = st[b + HAS];
+		final int b = t * STRIDE, r = t * RSTRIDE, has = hs[t];
 		if ((has & H_BRIDGE) != 0)
 		{
 			// rare: read from the bridge's tile as CpuOrder does
@@ -1350,7 +1508,7 @@ final class FastOrder
 		final boolean hasGround = (has & H_GROUND) != 0;
 		if (hasGround)
 		{
-			emit(refs[r + R_GROUND], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, refs[r + R_TILE], K_GROUND, t * ROLES + R_GROUND);
+			emit(groundAt[t], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, tileAt[t], K_GROUND, R_GROUND * ALL + t);
 		}
 
 		final boolean w = (has & H_WALL) != 0, d = (has & H_DECOR) != 0;
@@ -1373,23 +1531,23 @@ final class FastOrder
 			}
 			if ((a & firstMask) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, t * ROLES + R_W1);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, R_W1 * ALL + t);
 			}
 			if ((st[b + WB] & firstMask) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, t * ROLES + R_W2);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, R_W2 * ALL + t);
 			}
 		}
 		if (d)
 		{
-			emit(refs[r + R_D1], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR1, t * ROLES + R_D1);
-			emit(refs[r + R_D2], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR2, t * ROLES + R_D2);
+			emit(refs[r + R_D1], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR1, R_D1 * ALL + t);
+			emit(refs[r + R_D2], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR2, R_D2 * ALL + t);
 		}
 		if (hasGround)
 		{
 			if ((has & H_GOBJ) != 0)
 			{
-				emit(refs[r + R_G], st[b + GX], st[b + GY], refs[r + R_GOBJ], K_GOBJ, t * ROLES + R_G);
+				emit(gRen[t], gx[t], gy[t], gObj[t], K_GOBJ, R_G * ALL + t);
 			}
 			if ((has & H_ITEMS) != 0 && st[b + IH] == 0)
 			{
@@ -1397,7 +1555,7 @@ final class FastOrder
 			}
 		}
 
-		int m = st[b + MASK];
+		int m = tmask[t];
 		if (m != 0)
 		{
 			if (x < cx && (m & 4) != 0)
@@ -1422,16 +1580,16 @@ final class FastOrder
 	private void items(int t)
 	{
 		final int b = t * STRIDE, r = t * RSTRIDE;
-		emit(refs[r + R_IM], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IM);
-		emit(refs[r + R_IT], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IT);
-		emit(refs[r + R_IB], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IB);
+		emit(refs[r + R_IM], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, R_IM * ALL + t);
+		emit(refs[r + R_IT], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, R_IT * ALL + t);
+		emit(refs[r + R_IB], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, R_IB * ALL + t);
 	}
 
 	private void objects(int t, int p, int x, int y)
 	{
 		fl[t] &= ~LEFT;
 		nReady = 0;
-		for (int k = 0, nk = st[t * STRIDE + NOBJ]; k < nk; k++)
+		for (int k = 0, nk = nobj[t]; k < nk; k++)
 		{
 			int o = st[t * STRIDE + OBJ + k];
 			if (oDrawn[o] == stamp)
@@ -1520,7 +1678,7 @@ final class FastOrder
 
 	private void second(int t)
 	{
-		final int b = t * STRIDE, r = t * RSTRIDE, has = st[b + HAS];
+		final int b = t * STRIDE, r = t * RSTRIDE, has = hs[t];
 		if ((has & H_ITEMS) != 0 && st[b + IH] != 0)
 		{
 			items(t);
@@ -1530,11 +1688,11 @@ final class FastOrder
 		{
 			if ((st[b + WB] & late) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, t * ROLES + R_W2);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, R_W2 * ALL + t);
 			}
 			if ((st[b + WA] & late) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, t * ROLES + R_W1);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, R_W1 * ALL + t);
 			}
 		}
 	}

@@ -40,13 +40,44 @@ class GpuIntBuffer
 			.put(w);
 	}
 
+	// zone mode's prepared draws (11/19/2026): eight ints at a time into a plain array, put in the buffer in one go when
+	// it's flipped (each entry carries its own place in the output, so their order in the buffer doesn't matter)
+	private int[] staged = new int[1024];
+	private int nStaged;
+
+	void stage(int a, int b, int c, int d, int e, int f, int g, int h)
+	{
+		if (nStaged + 8 > staged.length)
+		{
+			staged = java.util.Arrays.copyOf(staged, staged.length * 2);
+		}
+		final int[] s = staged;
+		final int n = nStaged;
+		s[n] = a;
+		s[n + 1] = b;
+		s[n + 2] = c;
+		s[n + 3] = d;
+		s[n + 4] = e;
+		s[n + 5] = f;
+		s[n + 6] = g;
+		s[n + 7] = h;
+		nStaged = n + 8;
+	}
+
 	void flip()
 	{
+		if (nStaged > 0)
+		{
+			ensureCapacity(nStaged);
+			buffer.put(staged, 0, nStaged);
+			nStaged = 0;
+		}
 		buffer.flip();
 	}
 
 	void clear()
 	{
+		nStaged = 0;
 		buffer.clear();
 	}
 

@@ -137,7 +137,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// fog, as the GPU plugin's (11/18/2026): up to this many tiles in from the draw distance's edge
 	static final int MAX_FOG_DEPTH = 100;
 	static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2; // offset for sxy -> msxy
-	private static final int GROUND_MIN_Y = 350; // how far below the ground models extend
+	static final int GROUND_MIN_Y = 350; // how far below the ground models extend
 
 	@Inject
 	private Client client;
@@ -453,7 +453,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int framePlane;
 	// the developer build's count of why zone mode left tiles out (level, hidden roof, frustum, in view), logged every
 	// five seconds with Log frame timings on
-	private final int[] zoneWhy = new int[5];
 	private boolean zoneWhyNext;
 	private long lastZoneWhyLog;
 	private volatile boolean zoneFrame;
@@ -2909,7 +2908,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			stage.owner[stage.n - 1] = tileObject;
 			if (timing)
 			{
-				timer.zoneCopy(System.nanoTime() - t0);
+				timer.zoneCopy(System.nanoTime() - t0, renderThreadId < 0);
 			}
 		}
 	}
@@ -2941,7 +2940,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			stageUpload(stage, scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash(), gameObject, true);
 			if (timing)
 			{
-				timer.zoneCopy(System.nanoTime() - t0);
+				timer.zoneCopy(System.nanoTime() - t0, true);
 			}
 		}
 	}
@@ -3255,6 +3254,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	}
 
 	private boolean zoneWarned;
+	private final FastOrder.Frustum zoneFrustum = new FastOrder.Frustum();
 	// zone mode's reading since the last log: whole scenes, zones and tiles read again
 	private int zoneFullReads, zoneReadZones;
 	private long zoneReadSlots;
@@ -3325,13 +3325,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final float ps = framePitchSin, pc = framePitchCos, ys = frameYawSin, yc = frameYawCos;
 		final int cx = frameCamX, cy = frameCamY, cz = frameCamZ;
 		// which tiles the client would draw: its render level within the levels shown, a hidden roof's tiles left out,
-		// and the frustum (the old mode's tileInFrustum)
+		// and the frustum (the old mode's tileInFrustum). The walk tests them itself (FastOrder.viewZone, from what it
+		// worked out when it read each tile); this, reading the scene, is for CpuOrder (the reference walk, the check)
 		final boolean count = Build.DEVELOPER && timing;
-		final int[] why = zoneWhy;
-		if (count)
-		{
-			java.util.Arrays.fill(why, 0);
-		}
 		final CpuOrder.Visible visible = (p, x, y) ->
 		{
 			Tile t = tiles[p][x][y];
@@ -3342,16 +3338,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			// its level by the client's own rule; above the highest level drawn it's left out, unless roof removal is on
 			// (the client's walk, ei.iv, then leaves out only hidden roofs' tiles)
 			int rl = drawLevel(settings, p, x, y);
-			if (count && settings != null && rl != ((settings[p][x][y] & 8) != 0 ? 0 : p))
-			{
-				why[4]++;  // a tile under a bridge, whose level the 11/19/2026 reading changed
-			}
 			if (rl > maxLevel && !roofRemoval)
 			{
-				if (count)
-				{
-					why[0]++;
-				}
 				return false;
 			}
 			if (roofRemoval && level < rl && roofs != null)
@@ -3359,20 +3347,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				int roof = roofs[level][x][y];
 				if (roof != 0 && hide.contains(roof))
 				{
-					if (count)
-					{
-						why[1]++;
-					}
 					return false;
 				}
 			}
-			boolean in = x > 0 && y > 0 && x < Constants.EXTENDED_SCENE_SIZE - 1 && y < Constants.EXTENDED_SCENE_SIZE - 1
+			return x > 0 && y > 0 && x < Constants.EXTENDED_SCENE_SIZE - 1 && y < Constants.EXTENDED_SCENE_SIZE - 1
 				&& inFrustum(scene, ps, pc, ys, yc, cx, cy, cz, p, x, y);
-			if (count)
-			{
-				why[in ? 3 : 2]++;
-			}
-			return in;
 		};
 		final int distance = getDrawDistance();
 		final long t0 = timing ? System.nanoTime() : 0;
@@ -3380,9 +3359,47 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			zoneWhyNext = true;
 		}
+		final FastOrder.Frustum fr = zoneFrustum;
+		fr.pitchSin = ps;
+		fr.pitchCos = pc;
+		fr.yawSin = ys;
+		fr.yawCos = yc;
+		fr.camX = cx;
+		fr.camY = cy;
+		fr.camZ = cz;
+		fr.zoom = client.get3dZoom();
+		fr.clipMidX2 = client.getRasterizer3D_clipMidX2();
+		fr.clipNegMidX = client.getRasterizer3D_clipNegativeMidX();
+		fr.clipNegMidY = client.getRasterizer3D_clipNegativeMidY();
+		fr.level = level;
+		fr.maxLevel = maxLevel;
+		fr.roofRemoval = roofRemoval;
+		fr.roofs = roofs;
+		fr.hide = hide;
+		fr.count = count;
+		// the static draws from their prepared records (made the first time each is drawn, kept until its zone is read
+		// again or the scene changes); the rest, and every draw while a diagnostic needs each call, as before. The
+		// records are dropped before the walk when the settings in them change (the walk notes entries by them)
+		final boolean prepared = !orderTest && !drawOrderLog.recording();
+		if (prepared)
+		{
+			final int key = (groundHides ? 1 : 0) | (painterModels ? 2 : 0) | sceneId << 2;
+			if (key != recsKey || nRecs > (1 << 20))
+			{
+				// (also past a million: records left by zones read again pile up)
+				fastOrder.dropRecords();
+				recsKey = key;
+				nRecs = 0;
+				recsSeen = fastOrder.records;
+			}
+		}
 		fastOrder.setTemps(tempG, temps);
 		fastOrder.setItems(itemLayers, nItemLayers);
-		fastOrder.buildCached(scene, cx, cz, distance, visible);
+		// (entries with a prepared draw noted by it alone, unless a check or diagnostic needs every entry in full)
+		fastOrder.lean = prepared && !zoneCheck;
+		fastOrder.buildCached(scene, cx, cz, distance, visible, fr);
+		final boolean lean = fastOrder.lean;
+		fastOrder.lean = false;
 		fastOrder.setTemps(null, 0);
 		fastOrder.setItems(null, 0);
 		zoneReadZones += fastOrder.zonesRead;
@@ -3412,9 +3429,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				zoneFullReads, zoneReadZones, zoneReadSlots - zoneFullReads * 4 * Constants.EXTENDED_SCENE_SIZE * Constants.EXTENDED_SCENE_SIZE);
 			zoneFullReads = zoneReadZones = 0;
 			zoneReadSlots = 0;
-			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}; tiles under a bridge given another level by the settings read before bridges {}",
+			final int[] why = zoneFrustum.why;
+			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}",
 				scene.getMinLevel(), level, maxLevel, scene.getRoofRemovalMode(), hide, framePlane,
-				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3], why[4]);
+				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3]);
 		}
 		if (reference)
 		{
@@ -3428,32 +3446,23 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int[] params = new int[4];
 		// the static draws from their prepared records (made the first time each is drawn, kept until its zone is read
 		// again or the scene changes); the rest, and every draw while a diagnostic needs each call, as before
-		final boolean prepared = !orderTest && !drawOrderLog.recording();
-		if (prepared)
+		if (prepared && fastOrder.records != recsSeen)
 		{
-			final int key = (groundHides ? 1 : 0) | (painterModels ? 2 : 0) | sceneId << 2;
-			if (key != recsKey)
-			{
-				fastOrder.dropRecords();
-				recsKey = key;
-			}
-			if (fastOrder.records != recsSeen)
-			{
-				nRecs = 0;
-				recsSeen = fastOrder.records;
-			}
-			if (nRecs > (1 << 20))
-			{
-				// (records left by zones read again pile up; start again past a million)
-				fastOrder.dropRecords();
-				nRecs = 0;
-				recsSeen = fastOrder.records;
-			}
+			// (the scene read whole in this frame's walk: every record dropped with it, none used yet)
+			nRecs = 0;
+			recsSeen = fastOrder.records;
 		}
 		final long loop0 = timing ? System.nanoTime() : 0, apart0 = timing ? timer.callbacksSoFar() : 0;
 		int fast = 0;
+		final int[] krec = fastOrder.krec;
 		for (int k = 0; k < fastOrder.n; k++)
 		{
+			if (lean && krec[k] >= 0)
+			{
+				drawRecord(krec[k]);
+				fast++;
+				continue;
+			}
 			if (prepared)
 			{
 				int r = record(scene, k, params);
@@ -3621,25 +3630,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if ((bits & RB_GROUND) != 0)
 		{
-			GpuIntBuffer g = modelBufferUnordered;
 			++unorderedModels;
 			tierFaces[0] += R[b + 2];
-			g.ensureCapacity(8);
-			g.getBuffer().put(R[b]).put(R[b + 1]).put(R[b + 2]).put(targetBufferOffset).put(R[b + 3])
-				.put(R[b + 4]).put(R[b + 5]).put(R[b + 6]);
+			modelBufferUnordered.stage(R[b], R[b + 1], R[b + 2], targetBufferOffset, R[b + 3], R[b + 4], R[b + 5], R[b + 6]);
 			targetBufferOffset += R[b + 7];
 			return;
 		}
-		if (!isVisible(R[b + 7], R[b + 8], R[b + 9], framePitchSin, framePitchCos, frameYawSin, frameYawCos,
-			R[b + 4] - frameCamX, R[b + 5] - frameCamY, R[b + 6] - frameCamZ))
+		if (!visibleFast(R[b + 7], R[b + 8], R[b + 9], R[b + 4] - frameCamX, R[b + 5] - frameCamY, R[b + 6] - frameCamZ))
 		{
 			return;
 		}
 		final int tc = R[b + 2];
-		final GpuIntBuffer g = bufferForTriangles(tc);
-		g.ensureCapacity(8);
-		g.getBuffer().put(R[b]).put(R[b + 1]).put(tc).put(targetBufferOffset).put(R[b + 3])
-			.put(R[b + 4]).put(R[b + 5]).put(R[b + 6]);
+		bufferForTriangles(tc).stage(R[b], R[b + 1], tc, targetBufferOffset, R[b + 3], R[b + 4], R[b + 5], R[b + 6]);
 		final int before = targetBufferOffset;
 		targetBufferOffset += tc * 3;
 		if (tc > 0)
@@ -3653,6 +3655,60 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				painterRange(before, tc * 3);
 			}
 		}
+	}
+
+	/**
+	 * isVisible with the frame's camera, the same answer with fewer divisions: each of its tests "a / depth against c"
+	 * (depth over 50, so positive) is first made as "a against c * depth", and only when the two sides are within a
+	 * hundred-thousandth of each other (where the roundings of the two ways could differ) by the division itself.
+	 */
+	private boolean visibleFast(int xzMag, int bottomY, int modelHeight, int x, int y, int z)
+	{
+		final float pitchSin = framePitchSin, pitchCos = framePitchCos, yawSin = frameYawSin, yawCos = frameYawCos;
+		final int zoom = clipZoom;
+		float var11 = yawCos * z - yawSin * x;
+		float var12 = pitchSin * y + pitchCos * var11;
+		float var13 = pitchCos * xzMag;
+		float depth = var12 + var13;
+		if (depth > 50)
+		{
+			float rx = z * yawSin + yawCos * x;
+			float var16 = (rx - xzMag) * zoom;
+			if (below(var16, depth, clipMidX2))
+			{
+				float var17 = (rx + xzMag) * zoom;
+				if (below(-var17, depth, -clipNegMidX))
+				{
+					float ry = pitchCos * y - var11 * pitchSin;
+					float yheight = pitchSin * xzMag;
+					float ybottom = (pitchCos * bottomY) + yheight;
+					float var20 = (ry + ybottom) * zoom;
+					if (below(-var20, depth, -clipNegMidY))
+					{
+						float ytop = (pitchCos * modelHeight) + yheight;
+						float var22 = (ry - ytop) * zoom;
+						return below(var22, depth, clipMidY2);
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	// a / depth < c (depth positive), exactly as the division compares, mostly without it
+	private static boolean below(float a, float depth, int c)
+	{
+		final float m = c * depth;
+		final float e = Math.abs(m) * 1e-5f;
+		if (a < m - e)
+		{
+			return true;
+		}
+		if (a > m + e)
+		{
+			return false;
+		}
+		return a / depth < c;
 	}
 
 	// the developer check (Zone mode: check the walk): every prepared draw this frame worked out again from the client's

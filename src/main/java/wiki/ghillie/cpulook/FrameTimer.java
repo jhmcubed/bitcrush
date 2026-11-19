@@ -101,7 +101,7 @@ class FrameTimer
 	// CPU Look working out the CPU's order itself (the re-sort diagnostic's CpuOrder.build): time, draws, frames
 	private long orderNs, orderDraws, orderReadNs, orderViewNs, orderSweepNs;
 	// zone mode (stage B): the moving models copied inside the client's drawTemp and drawDynamic, and how many
-	private long zoneCopyNs, zoneCopies;
+	private long zoneCopyNs, zoneCopies, zoneCopyOwnNs, zoneCopiesOwn;
 	private boolean zoneFrames;
 	private int orderFrames, orderChecked, orderDiffered;
 	private int recordReads;
@@ -177,10 +177,16 @@ class FrameTimer
 	// the re-sort diagnostic worked out the CPU's order this frame, in ns, for n draws
 	// the walk's parts: reading the scene (stage B would do it once at load), which tiles are in view, the sweep
 	// zone mode: one copy of a moving model, inside the client's own call (any thread)
-	synchronized void zoneCopy(long ns)
+	// own: on the client's own thread (the temporary objects, items, some animated scenery), which the frame waits for
+	synchronized void zoneCopy(long ns, boolean own)
 	{
 		zoneCopyNs += ns;
 		zoneCopies++;
+		if (own)
+		{
+			zoneCopyOwnNs += ns;
+			zoneCopiesOwn++;
+		}
 		zoneFrames = true;
 	}
 
@@ -430,7 +436,8 @@ class FrameTimer
 			triangles / n,
 			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below), and its copying of the "
 				+ "moving models the client hands over %.2f (%.0f models; added up over the client's threads, each copying its own "
-				+ "at the same time as the others, so the frame waits for less than this)", zoneCopyNs / n / 1e6, zoneCopies / n) : "")
+				+ "at the same time as the others, so the frame waits for less than this; on the client's own thread %.2f for %.0f)",
+				zoneCopyNs / n / 1e6, zoneCopies / n, zoneCopyOwnNs / n / 1e6, zoneCopiesOwn / n) : "")
 			+ (orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
 				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene, in zone mode the zones read again and the temporary objects put on, %.2f, which tiles are in view %.2f, the sweep "
 				+ "%.2f), checked against the reference walk in %d frames, %d differing", orderNs / (double) orderFrames / 1e6,
@@ -459,7 +466,7 @@ class FrameTimer
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
-		zoneCopyNs = zoneCopies = 0;
+		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);
@@ -557,7 +564,7 @@ class FrameTimer
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
-		zoneCopyNs = zoneCopies = 0;
+		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);

@@ -2054,7 +2054,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 		// the record path's count done in the compute pass this frame (count_fused.glsl), its empty faces not written
 		decideFrame();
-		fusedCount = fuseCount && fRecords;
+		fusedCount = fuseCount && fRecords && (!Build.DEVELOPER || config.fusedCount());
 		if (fuseCount)
 		{
 			growBuffer(recCounts, GL43C.GL_SHADER_STORAGE_BUFFER, Math.max(1, targetBufferOffset / 3) * 8, GL43C.GL_DYNAMIC_DRAW);

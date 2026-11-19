@@ -329,6 +329,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "fusedCount",
+		name = "Count in the compute pass",
+		description = "The record path's count of each face's triangles done by the compute pass as it writes the face, and faces that draw nothing not written. Off: the count as its own pass over every face, every face written, as before (to compare; the same picture).",
+		position = 49,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean fusedCount()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

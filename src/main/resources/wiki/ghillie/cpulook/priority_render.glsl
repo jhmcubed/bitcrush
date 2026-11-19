@@ -113,7 +113,12 @@ void load_face(uint localId, modelinfo minfo, out vert o1, out vert o2, out vert
     thisB = tempvb[offset + ssboOffset * 3 + 1];
     thisC = tempvb[offset + ssboOffset * 3 + 2];
   }
-  if (localId < size) {
+  if (localId < size && (flags & CAM_SPACE) != 0) {
+    // a model on a boat: its corners already in camera space, as the client's matrix leaves them (CAM_SPACE)
+    o1 = thisA;
+    o2 = thisB;
+    o3 = thisC;
+  } else if (localId < size) {
     int orientation = flags & 0x7ff;
     o1 = vert(rotate_vertex(vec4(thisA.pos, 0), orientation).xyz, thisA.ahsl);
     o2 = vert(rotate_vertex(vec4(thisB.pos, 0), orientation).xyz, thisB.ahsl);
@@ -132,8 +137,15 @@ void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool
   load_face(localId, minfo, a, b, c);
   if (localId < minfo.size) {
     prio = (a.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
-    dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
-    visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
+    if ((minfo.flags & CAM_SPACE) != 0) {
+      // a model on a boat (fo.mi, then bi): each corner's depth is (int) of its camera z less the model origin's, which
+      // the client takes from the same matrix, (int) of its z (CpuLookPlugin's boat upload puts it in y)
+      dis = cpu_tdiv((int(a.pos.z) - minfo.y) + (int(b.pos.z) - minfo.y) + (int(c.pos.z) - minfo.y), 3);
+      visible = face_visible_cam(a.pos, b.pos, c.pos);
+    } else {
+      dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
+      visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
+    }
     // The CPU's order of a model's faces (its model draw, fo.java 1.13.7, read 11/19/2026 for the ToA fire's core): only
     // render mode 2 models (players, most NPCs: the painter mark, bit 29) are drawn with their faces' priorities (ei(true),
     // bt). Every other model's solid faces go in their own order, by index (the solid pass, mode 3, bq), and its
@@ -255,8 +267,8 @@ bool roundsSurely(float f, float margin, out int v) {
 // only the screen points differ, by the card's division, and the margins cover that many times over: a face is
 // never skipped that the setup (setup.glsl's setupFace) would draw (ShaderCheck's skip check). Faces across the near
 // plane are left to the setup.
-bool surelyEmpty(vec3 a, vec3 b, vec3 c) {
-  vec3 k0 = cpu_turn(a), k1 = cpu_turn(b), k2 = cpu_turn(c);
+bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam) {
+  vec3 k0 = cam ? a : cpu_turn(a), k1 = cam ? b : cpu_turn(b), k2 = cam ? c : cpu_turn(c);
   if (!(k0.z >= 50.0 && k1.z >= 50.0 && k2.z >= 50.0)) {
     return false;
   }
@@ -396,15 +408,17 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
     vec4 place = vec4(minfo.x, minfo.y, minfo.z, 0);
     int plane = (flags >> 24) & 3;
     int hillskew = (flags >> 26) & 1;
-    vec4 vertA = hillskew_rel(vec4(thisrvA.pos, 0), pos, place, hillskew, minfo.y, plane);
-    vec4 vertB = hillskew_rel(vec4(thisrvB.pos, 0), pos, place, hillskew, minfo.y, plane);
-    vec4 vertC = hillskew_rel(vec4(thisrvC.pos, 0), pos, place, hillskew, minfo.y, plane);
+    bool cam = (flags & CAM_SPACE) != 0;
+    vec4 vertA = cam ? vec4(thisrvA.pos, 0) : hillskew_rel(vec4(thisrvA.pos, 0), pos, place, hillskew, minfo.y, plane);
+    vec4 vertB = cam ? vec4(thisrvB.pos, 0) : hillskew_rel(vec4(thisrvB.pos, 0), pos, place, hillskew, minfo.y, plane);
+    vec4 vertC = cam ? vec4(thisrvC.pos, 0) : hillskew_rel(vec4(thisrvC.pos, 0), pos, place, hillskew, minfo.y, plane);
 
     // the CPU look, for "the ground hides what's under it": grass and other ground decorations marked as the ground
     // (bit 22), players, NPCs, items and projectiles as never hidden (bit 23)
     int mark = ((flags & (1 << 28)) != 0 ? 0x800000 : 0) | ((flags & (1 << 27)) != 0 ? 0x400000 : 0)
       | ((flags & (1 << 29)) != 0 ? 0x200000 : 0)  // render mode 2 (geom.glsl's painterPass)
-      | ((flags & (1 << 30)) != 0 ? 0x80000 : 0);  // the CPU's solid pass only: never its see-through faces
+      | ((flags & (1 << 30)) != 0 ? 0x80000 : 0)  // the CPU's solid pass only: never its see-through faces
+      | (cam ? 0x40000 : 0);  // already in camera space: the setup doesn't turn it (setup.glsl's toCorner)
     // (the face's bias rides on in its texture slot, uv.x's bits 9-16: SceneUploader.pushModel)
     thisrvA.ahsl &= ~0xff0000;
     thisrvB.ahsl &= ~0xff0000;
@@ -412,7 +426,7 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
 
 #ifdef SKIP_EMPTY
     // a face that surely draws nothing (fully see-through, or surelyEmpty): only the mark that says so
-    if (((thisrvA.ahsl >> 24) & 0xff) == 255 || surelyEmpty(vertA.xyz, vertB.xyz, vertC.xyz)) {
+    if (((thisrvA.ahsl >> 24) & 0xff) == 255 || surelyEmpty(vertA.xyz, vertB.xyz, vertC.xyz, cam)) {
       vout[outOffset + myOffset * 3].ahsl = int(0xff000000u);
       return;
     }
@@ -427,6 +441,11 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
       uvout[outOffset + myOffset * 3] = vec4(0);
       uvout[outOffset + myOffset * 3 + 1] = vec4(0);
       uvout[outOffset + myOffset * 3 + 2] = vec4(0);
+    } else if (cam) {
+      // the texture's points in camera space too (the boat upload turned them with the corners)
+      uvout[outOffset + myOffset * 3] = temptexb[toffset + localId * 3];
+      uvout[outOffset + myOffset * 3 + 1] = temptexb[toffset + localId * 3 + 1];
+      uvout[outOffset + myOffset * 3 + 2] = temptexb[toffset + localId * 3 + 2];
     } else {
       vec4 texA, texB, texC;
 

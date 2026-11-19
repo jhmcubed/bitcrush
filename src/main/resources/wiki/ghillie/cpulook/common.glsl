@@ -89,3 +89,14 @@ bool face_visible(vec3 vA, vec3 vB, vec3 vC, ivec4 position) {
 
   return (sA.x - sB.x) * (sC.y - sB.y) - (sC.x - sB.x) * (sA.y - sB.y) > 0;
 }
+
+/*
+ * The same test for corners already in camera space (a model on a boat, CAM_SPACE): the screen points as toScreen
+ * makes them from the turned corner
+ */
+bool face_visible_cam(vec3 a, vec3 b, vec3 c) {
+  vec2 sA = vec2(a.x * zoom / a.z + centerX, a.y * zoom / a.z + centerY);
+  vec2 sB = vec2(b.x * zoom / b.z + centerX, b.y * zoom / b.z + centerY);
+  vec2 sC = vec2(c.x * zoom / c.z + centerX, c.y * zoom / c.z + centerY);
+  return (sA.x - sB.x) * (sC.y - sB.y) - (sC.x - sB.x) * (sA.y - sB.y) > 0;
+}

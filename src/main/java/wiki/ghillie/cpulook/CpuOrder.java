@@ -61,7 +61,8 @@ final class CpuOrder
 	}
 
 	private static final int SIZE = Constants.EXTENDED_SCENE_SIZE;
-	private static final int OFFSET = CpuLookPlugin.SCENE_OFFSET;
+	// the scene's tile 0 in its array: the top level's extended scene's offset, or 0 for a boat's scene (buildSub)
+	private int OFFSET = CpuLookPlugin.SCENE_OFFSET;
 
 	// by where the camera stands from the tile (x: before, on, after it; y: after, on, before it; 0 to 8):
 	private static final int[] FIRST = {19, 55, 38, 155, 255, 110, 137, 205, 76};  // wall sides drawn with the tile's ground
@@ -145,9 +146,11 @@ final class CpuOrder
 		t.objMask |= mask(o, t.x, t.y);
 	}
 
-	// the order
+	// the order: each entry's key, place, and (for working out its draw: FastOrder.draw) its source and kind
 	Object[] keys = new Object[8192];
 	int[] kx = new int[8192], kz = new int[8192];
+	Object[] ksrc = new Object[8192];
+	byte[] kkind = new byte[8192];
 	int n;
 
 	void build(Scene scene, int cameraX, int cameraZ, int drawDistance, Visible visible)
@@ -161,6 +164,7 @@ final class CpuOrder
 		{
 			return;
 		}
+		OFFSET = CpuLookPlugin.SCENE_OFFSET;
 		camX = cameraX;
 		camZ = cameraZ;
 		cx = Math.max(0, Math.min(SIZE - 1, (cameraX >> 7) + OFFSET));
@@ -170,7 +174,46 @@ final class CpuOrder
 		xmax = Math.min(SIZE, cx + r);
 		ymin = Math.max(0, cy - r);
 		ymax = Math.min(SIZE, cy + r);
-		int minLevel = Math.max(0, scene.getMinLevel());
+		sweep(tiles, Math.max(0, scene.getMinLevel()), r, visible);
+	}
+
+	/**
+	 * A boat's scene (11/19/2026; claude/cpu-look.md, section 9, "Sailing's boats"): the client's walk inside it (the
+	 * scene's own iv, the same as the main world's) over every tile of its array (no draw distance, no view test: its
+	 * range is the whole scene), tile 0 at index 0, the camera in the boat's own units as the client works it out (the
+	 * inverse of the boat's matrix applied to the camera, handed over by preSceneDraw) and not clamped, so the walk can
+	 * start outside the boat; the radius is the client's (half the scene's size, more by the camera's distance from its
+	 * middle: every tile within it, and the larger of its two the one loop, since the client's two loops' extra steps
+	 * visit nothing). visible: the levels drawn.
+	 */
+	void buildSub(Scene scene, int cameraX, int cameraZ, int minLevel, Visible visible)
+	{
+		stamp++;
+		n = 0;
+		objects.clear();
+		deque.clear();
+		Tile[][][] tiles = scene.getExtendedTiles();
+		if (tiles == null || tiles.length == 0 || tiles[0] == null || tiles[0].length == 0 || tiles[0][0] == null)
+		{
+			return;
+		}
+		OFFSET = 0;
+		camX = cameraX;
+		camZ = cameraZ;
+		final int w = Math.min(SIZE, tiles[0].length), h = Math.min(SIZE, tiles[0][0].length);
+		cx = cameraX >> 7;
+		cy = cameraZ >> 7;
+		xmin = 0;
+		xmax = w;
+		ymin = 0;
+		ymax = h;
+		final int half = Math.max(w / 2, h / 2);
+		final int r = Math.max(Math.abs(cx - w / 2), Math.abs(cy - h / 2)) + half;
+		sweep(tiles, Math.max(0, minLevel), r, visible);
+	}
+
+	private void sweep(Tile[][][] tiles, int minLevel, int r, Visible visible)
+	{
 		pending = 0;
 		steps = 0;
 		gaveUp = false;
@@ -323,7 +366,7 @@ final class CpuOrder
 		return (x > o.sx ? 1 : 0) + (x < o.ex ? 4 : 0) + (y > o.sy ? 8 : 0) + (y < o.ey ? 2 : 0);
 	}
 
-	private void emit(Object key, int x, int z)
+	private void emit(Object key, int x, int z, Object src, byte kind)
 	{
 		if (key == null)
 		{
@@ -334,10 +377,14 @@ final class CpuOrder
 			keys = java.util.Arrays.copyOf(keys, n * 2);
 			kx = java.util.Arrays.copyOf(kx, n * 2);
 			kz = java.util.Arrays.copyOf(kz, n * 2);
+			ksrc = java.util.Arrays.copyOf(ksrc, n * 2);
+			kkind = java.util.Arrays.copyOf(kkind, n * 2);
 		}
 		keys[n] = key;
 		kx[n] = x;
 		kz[n] = z;
+		ksrc[n] = src;
+		kkind[n] = kind;
 		n++;
 	}
 
@@ -416,7 +463,7 @@ final class CpuOrder
 					WallObject w = t.tile.getWallObject();
 					if (w != null)
 					{
-						emit(w.getRenderable1(), w.getX(), w.getY());
+						emit(w.getRenderable1(), w.getX(), w.getY(), w, FastOrder.K_WALL1);
 					}
 					t.edges = 0;
 				}
@@ -482,11 +529,11 @@ final class CpuOrder
 		int lx = (x - OFFSET) * 128 + 64, lz = (y - OFFSET) * 128 + 64;
 		if (tile.getSceneTilePaint() != null)
 		{
-			emit(tile.getSceneTilePaint(), lx, lz);
+			emit(tile.getSceneTilePaint(), lx, lz, tile, FastOrder.K_GROUND);
 		}
 		else if (tile.getSceneTileModel() != null)
 		{
-			emit(tile.getSceneTileModel(), lx, lz);
+			emit(tile.getSceneTileModel(), lx, lz, tile, FastOrder.K_GROUND);
 		}
 	}
 
@@ -502,22 +549,22 @@ final class CpuOrder
 			WallObject bw = bridge.getWallObject();
 			if (bw != null)
 			{
-				emit(bw.getRenderable1(), bw.getX(), bw.getY());
+				emit(bw.getRenderable1(), bw.getX(), bw.getY(), bw, FastOrder.K_WALL1);
 				// the rest of what lies under a bridge, which the CPU's solid pass draws there and its see-through pass
 				// doesn't (FastOrder.Bridge; drawn solid only): the wall's second half, then below its wall decoration
 				// and its ground decoration (11/19/2026: the GE's dark rocks)
-				emit(bw.getRenderable2(), bw.getX(), bw.getY());
+				emit(bw.getRenderable2(), bw.getX(), bw.getY(), bw, (byte) (FastOrder.K_WALL2 | FastOrder.K_SOLID));
 			}
 			DecorativeObject bd = bridge.getDecorativeObject();
 			if (bd != null)
 			{
-				emit(bd.getRenderable(), bd.getX(), bd.getY());
-				emit(bd.getRenderable2(), bd.getX(), bd.getY());
+				emit(bd.getRenderable(), bd.getX(), bd.getY(), bd, (byte) (FastOrder.K_DECOR1 | FastOrder.K_SOLID));
+				emit(bd.getRenderable2(), bd.getX(), bd.getY(), bd, (byte) (FastOrder.K_DECOR2 | FastOrder.K_SOLID));
 			}
 			GroundObject bg = bridge.getGroundObject();
 			if (bg != null)
 			{
-				emit(bg.getRenderable(), bg.getX(), bg.getY());
+				emit(bg.getRenderable(), bg.getX(), bg.getY(), bg, (byte) (FastOrder.K_GOBJ | FastOrder.K_SOLID));
 			}
 			GameObject[] bos = bridge.getGameObjects();
 			if (bos != null)
@@ -526,7 +573,7 @@ final class CpuOrder
 				{
 					if (g != null && (!sceneryOnly || FastOrder.scenery(g)))
 					{
-						emit(g.getRenderable(), g.getX(), g.getY());
+						emit(g.getRenderable(), g.getX(), g.getY(), g, FastOrder.K_OBJ);
 					}
 				}
 			}
@@ -559,25 +606,25 @@ final class CpuOrder
 			}
 			if ((a & firstMask) != 0)
 			{
-				emit(w.getRenderable1(), w.getX(), w.getY());
+				emit(w.getRenderable1(), w.getX(), w.getY(), w, FastOrder.K_WALL1);
 			}
 			if ((w.getOrientationB() & firstMask) != 0)
 			{
-				emit(w.getRenderable2(), w.getX(), w.getY());
+				emit(w.getRenderable2(), w.getX(), w.getY(), w, FastOrder.K_WALL2);
 			}
 		}
 		if (d != null)
 		{
 			// which way a wall decoration faces isn't in RuneLite's API: both halves go with the tile's first part
-			emit(d.getRenderable(), d.getX(), d.getY());
-			emit(d.getRenderable2(), d.getX(), d.getY());
+			emit(d.getRenderable(), d.getX(), d.getY(), d, FastOrder.K_DECOR1);
+			emit(d.getRenderable2(), d.getX(), d.getY(), d, FastOrder.K_DECOR2);
 		}
 		if (hasGround)
 		{
 			GroundObject g = tile.getGroundObject();
 			if (g != null)
 			{
-				emit(g.getRenderable(), g.getX(), g.getY());
+				emit(g.getRenderable(), g.getX(), g.getY(), g, FastOrder.K_GOBJ);
 			}
 			ItemLayer i = tile.getItemLayer();
 			if (i != null && i.getHeight() == 0)
@@ -618,9 +665,9 @@ final class CpuOrder
 		{
 			return;
 		}
-		emit(i.getMiddle(), i.getX(), i.getY());
-		emit(i.getTop(), i.getX(), i.getY());
-		emit(i.getBottom(), i.getX(), i.getY());
+		emit(i.getMiddle(), i.getX(), i.getY(), i, FastOrder.K_ITEM);
+		emit(i.getTop(), i.getX(), i.getY(), i, FastOrder.K_ITEM);
+		emit(i.getBottom(), i.getX(), i.getY(), i, FastOrder.K_ITEM);
 	}
 
 	// a tile's big objects, each once every tile under it has its first part drawn, the farthest first
@@ -687,7 +734,7 @@ final class CpuOrder
 				break;
 			}
 			best.drawn = stamp;
-			emit(best.g.getRenderable(), best.g.getX(), best.g.getY());
+			emit(best.g.getRenderable(), best.g.getX(), best.g.getY(), best.g, FastOrder.K_OBJ);
 			for (int fx = best.sx; fx <= best.ex; fx++)
 			{
 				for (int fy = best.sy; fy <= best.ey; fy++)
@@ -726,11 +773,11 @@ final class CpuOrder
 			{
 				if ((w.getOrientationB() & t.later) != 0)
 				{
-					emit(w.getRenderable2(), w.getX(), w.getY());
+					emit(w.getRenderable2(), w.getX(), w.getY(), w, FastOrder.K_WALL2);
 				}
 				if ((w.getOrientationA() & t.later) != 0)
 				{
-					emit(w.getRenderable1(), w.getX(), w.getY());
+					emit(w.getRenderable1(), w.getX(), w.getY(), w, FastOrder.K_WALL1);
 				}
 			}
 		}

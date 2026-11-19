@@ -433,14 +433,21 @@ class SceneUploader
 
 	public int pushModel(Model model, GpuIntBuffer vertexBuffer, GpuFloatBuffer uvBuffer)
 	{
+		return pushModel(model, vertexBuffer, uvBuffer, model.getVerticesX(), model.getVerticesY(), model.getVerticesZ());
+	}
+
+	/**
+	 * A model with its corners given (11/19/2026: a boat's, already through the boat's matrix in camera space,
+	 * BoatMath.corners): the same faces, colours and texture slots, each corner and texture point taken from these
+	 * arrays by its index.
+	 */
+	public int pushModel(Model model, GpuIntBuffer vertexBuffer, GpuFloatBuffer uvBuffer, float[] vertexX, float[] vertexY,
+		float[] vertexZ)
+	{
 		final int triangleCount = Math.min(model.getFaceCount(), CpuLookPlugin.MAX_TRIANGLE);
 
 		vertexBuffer.ensureCapacity(triangleCount * 12);
 		uvBuffer.ensureCapacity(triangleCount * 12);
-
-		final float[] vertexX = model.getVerticesX();
-		final float[] vertexY = model.getVerticesY();
-		final float[] vertexZ = model.getVerticesZ();
 
 		final int[] indices1 = model.getFaceIndices1();
 		final int[] indices2 = model.getFaceIndices2();
@@ -592,6 +599,137 @@ class SceneUploader
 		}
 
 		return triangleCount * 3;
+	}
+
+	/**
+	 * A boat's tile paint (11/19/2026; the client's ea.al): its four corners (x << 7, the corner's height, z << 7, the
+	 * tile's place in the boat's own scene) through the boat's matrix, south-west, south-east, north-east, north-west;
+	 * the whole tile left out if any is nearer than 50 (as the client leaves it), else the paint's two triangles as
+	 * upload(SceneTilePaint) lays them out, every corner and texture point in camera space. Returns the corners
+	 * written (0: nothing written).
+	 */
+	int pushBoatPaint(Scene scene, SceneTilePaint tile, int plane, int tileX, int tileY, float[] m, GpuIntBuffer vertexBuffer,
+		GpuFloatBuffer uvBuffer)
+	{
+		final int[][][] heights = scene.getTileHeights();
+		if (tile.getNeColor() == 12345678 || heights == null || plane < 0 || plane >= heights.length || tileX < 0 || tileY < 0
+			|| tileX + 1 >= heights[plane].length || tileY + 1 >= heights[plane][tileX].length)
+		{
+			return 0;
+		}
+		final float x0 = tileX << 7, z0 = tileY << 7;
+		final float x1 = x0 + 128.0F, z1 = 128.0F + z0;
+		final float hsw = heights[plane][tileX][tileY], hse = heights[plane][tileX + 1][tileY];
+		final float hne = heights[plane][tileX + 1][tileY + 1], hnw = heights[plane][tileX][tileY + 1];
+		final float[] c = paintCorners;
+		final float[][] at = {{x0, hsw, z0}, {x1, hse, z0}, {x1, hne, z1}, {x0, hnw, z1}};
+		for (int k = 0; k < 4; k++)
+		{
+			final float x = at[k][0], y = at[k][1], z = at[k][2];
+			final float d = BoatMath.z(m, x, y, z);
+			if (d < 50.0F)
+			{
+				return 0;
+			}
+			c[k * 3] = BoatMath.x(m, x, y, z);
+			c[k * 3 + 1] = BoatMath.y(m, x, y, z);
+			c[k * 3 + 2] = d;
+		}
+		final int[] hsl = {tile.getSwColor(), tile.getSeColor(), tile.getNeColor(), tile.getNwColor()};
+		vertexBuffer.ensureCapacity(24);
+		// 0 south-west, 1 south-east, 2 north-east, 3 north-west: (2, 3, 1) and (0, 1, 3), as upload(SceneTilePaint)
+		final int[] order = {2, 3, 1, 0, 1, 3};
+		for (int k : order)
+		{
+			vertexBuffer.put(c[k * 3], c[k * 3 + 1], c[k * 3 + 2], hsl[k]);
+		}
+		if (tile.getTexture() != -1)
+		{
+			uvBuffer.ensureCapacity(24);
+			final float tex = tile.getTexture() + 1;
+			final int[] tp = tile.isFlat() ? new int[]{0, 1, 3, 0, 1, 3} : new int[]{2, 3, 1, 0, 1, 3};
+			for (int k : tp)
+			{
+				uvBuffer.put(tex, c[k * 3], c[k * 3 + 1], c[k * 3 + 2]);
+			}
+		}
+		return 6;
+	}
+
+	private final float[] paintCorners = new float[12];
+
+	/**
+	 * A boat's shaped tile (the client's ea.av): every corner through the boat's matrix, the whole tile left out if any
+	 * is nearer than 50, else its faces as upload(SceneTileModel) lays them out, in camera space. cx, cy, cz: room for
+	 * the corners. Returns the corners written (0: nothing written).
+	 */
+	int pushBoatTileModel(SceneTileModel model, float[] m, GpuIntBuffer vertexBuffer, GpuFloatBuffer uvBuffer, float[] cx,
+		float[] cy, float[] cz)
+	{
+		final int[] vertexX = model.getVertexX();
+		final int[] vertexY = model.getVertexY();
+		final int[] vertexZ = model.getVertexZ();
+		final int count = vertexX.length;
+		if (cx.length < count)
+		{
+			return -count;  // (the caller makes room and asks again)
+		}
+		for (int v = 0; v < count; v++)
+		{
+			final float x = vertexX[v], y = vertexY[v], z = vertexZ[v];
+			final float d = BoatMath.z(m, x, y, z);
+			if (d < 50.0F)
+			{
+				return 0;
+			}
+			cx[v] = BoatMath.x(m, x, y, z);
+			cy[v] = BoatMath.y(m, x, y, z);
+			cz[v] = d;
+		}
+		final int[] faceX = model.getFaceX();
+		final int[] faceY = model.getFaceY();
+		final int[] faceZ = model.getFaceZ();
+		final int[] colorA = model.getTriangleColorA();
+		final int[] colorB = model.getTriangleColorB();
+		final int[] colorC = model.getTriangleColorC();
+		final int[] textures = model.getTriangleTextureId();
+		final int faceCount = faceX.length;
+		vertexBuffer.ensureCapacity(faceCount * 12);
+		if (textures != null)
+		{
+			uvBuffer.ensureCapacity(faceCount * 12);
+		}
+		int cnt = 0;
+		for (int i = 0; i < faceCount; i++)
+		{
+			if (colorA[i] == 12345678)
+			{
+				continue;
+			}
+			cnt += 3;
+			final int a = faceX[i], b = faceY[i], c = faceZ[i];
+			vertexBuffer.put(cx[a], cy[a], cz[a], colorA[i]);
+			vertexBuffer.put(cx[b], cy[b], cz[b], colorB[i]);
+			vertexBuffer.put(cx[c], cy[c], cz[c], colorC[i]);
+			if (textures != null)
+			{
+				if (textures[i] != -1)
+				{
+					final float tex = textures[i] + 1;
+					final int p = model.isFlat() ? 0 : a, q = model.isFlat() ? 1 : b, r = model.isFlat() ? 3 : c;
+					uvBuffer.put(tex, cx[p], cy[p], cz[p]);
+					uvBuffer.put(tex, cx[q], cy[q], cz[q]);
+					uvBuffer.put(tex, cx[r], cy[r], cz[r]);
+				}
+				else
+				{
+					uvBuffer.put(0, 0, 0, 0);
+					uvBuffer.put(0, 0, 0, 0);
+					uvBuffer.put(0, 0, 0, 0);
+				}
+			}
+		}
+		return cnt;
 	}
 
 	/** Whether a model needs texture slots: textures, or any face's bias (carried in the slot, uv.x's bits 9-16). */

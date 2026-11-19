@@ -25,6 +25,10 @@
 
 #define PI 3.1415926535897932384626433832795f
 #define UNIT PI / 1024.0f
+// a model's flag (bit 23, 11/19/2026: Sailing's boats): its corners and texture points come already in camera space,
+// turned by the client's own float matrix on the processor (BoatMath), so neither the compute pass nor the setup turns
+// them; y holds the model origin's (int) camera depth for the face depths
+#define CAM_SPACE (1 << 23)
 
 layout(std140) uniform uniforms {
   float cameraYaw;

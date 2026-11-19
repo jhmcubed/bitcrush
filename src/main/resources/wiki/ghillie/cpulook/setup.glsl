@@ -47,9 +47,11 @@ struct corner {
   ivec3 ci;     // (int) of the camera floats: the textured routine's points, the near cut
 };
 
-corner toCorner(vec3 rel) {
+// rel: the corner relative to the camera, turned here as the client turns it; or, with cam (0x40000 on the face's
+// corners: a model or the ground on a boat), already in camera space from the client's own matrix (BoatMath)
+corner toCorner(vec3 rel, bool cam) {
   corner k;
-  k.cam = cpu_turn(rel);
+  k.cam = cam ? rel : cpu_turn(rel);
   precise float px = k.cam.x * float(zoom);
   precise float py = k.cam.y * float(zoom);
   precise float sx = float(centerX) + fdiv(px, k.cam.z);
@@ -260,8 +262,9 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
 int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool full, out Rec r0, out Rec r1) {
   corner k[3];
   int col[3];
+  bool cam = (ahsl[0] & 0x40000) != 0;
   for (int i = 0; i < 3; i++) {
-    k[i] = toCorner(v[i]);
+    k[i] = toCorner(v[i], cam);
     col[i] = ahsl[i] & 0xffff;
   }
   int alpha = (ahsl[0] >> 24) & 0xff;
@@ -273,7 +276,7 @@ int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool f
   int t40 = 0;
   bool tile = (ahsl[0] & 0x100000) != 0;
   if (full && texId >= 0) {
-    textureTerms(toCorner(tp[0]).ci, toCorner(tp[1]).ci, toCorner(tp[2]).ci, tile, t0, t1, t40);
+    textureTerms(toCorner(tp[0], cam).ci, toCorner(tp[1], cam).ci, toCorner(tp[2], cam).ci, tile, t0, t1, t40);
     flags = 2 | (texId << 8);
   }
   flags |= ((ahsl[0] >> 20) & 12) | (tile ? 16 : 0);  // 4 the ground, 8 never hidden by it, 16 a ground tile

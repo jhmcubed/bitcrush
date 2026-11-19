@@ -63,13 +63,19 @@ void main() {
   vec3 pos = vec3(minfo.x - cameraPos.x, minfo.y - cameraPos.y, minfo.z - cameraPos.z);
   ivec4 texPos = ivec4(0, pos);
 
+  // (a boat's ground, CAM_SPACE: its corners and texture points already in camera space, from the client's matrix)
+  bool cam = (flags & CAM_SPACE) != 0;
+  if (cam) {
+    pos = vec3(0);
+    texPos = ivec4(0);
+  }
   vec3 vertA = thisA.pos + pos;
   vec3 vertB = thisB.pos + pos;
   vec3 vertC = thisC.pos + pos;
 
   // the CPU look: the ground marked (bit 22), for "the ground hides what's under it"
   // and every corner of it marked as a ground tile (bit 20): the CPU textures tiles with its own routine
-  int mark = ((flags & (1 << 27)) != 0 ? 0x400000 : 0) | 0x100000;
+  int mark = ((flags & (1 << 27)) != 0 ? 0x400000 : 0) | 0x100000 | (cam ? 0x40000 : 0);
 
   // position vertices in scene and write to out buffer
   vout[outOffset + myOffset * 3] = vert(vertA, thisA.ahsl | mark);

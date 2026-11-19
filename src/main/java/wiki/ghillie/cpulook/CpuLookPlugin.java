@@ -57,6 +57,7 @@ import net.runelite.api.IntProjection;
 import net.runelite.api.Model;
 import net.runelite.api.Perspective;
 import net.runelite.api.Projectile;
+import net.runelite.api.FloatProjection;
 import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
@@ -130,6 +131,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// drawn in the CPU's solid pass only (FastOrder.K_SOLID: what lies under a bridge beyond its ground, first wall half
 	// and objects): its corners marked 0x80000 by the compute pass, its see-through faces never drawn
 	private static final int FLAG_SOLID = 1 << 30;
+	// a model or ground on a boat (11/19/2026): its corners already in camera space, through the client's own matrix
+	// (BoatMath); the shaders' CAM_SPACE, their corners marked 0x40000 for the setup, the record's y the model origin's
+	// depth
+	static final int FLAG_CAM = 1 << 23;
 	// zoneEntry's draw of such an entry in full (drawRenderable's flags)
 	private boolean drawSolidOnly;
 	private static final int MARK_PAINTER = 0x200000;
@@ -493,6 +498,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int[] upOff = new int[512], upUv = new int[512], upLen = new int[512], upFlags = new int[512], upX = new int[512],
 		upY = new int[512], upZ = new int[512];
 	private boolean[] upSee = new boolean[512], upPainter = new boolean[512];
+	// a boat's ground: its record goes to the ground's compute pass (comp_unordered), not a model's
+	private boolean[] upTile = new boolean[512];
 	// a render mode 2 model's own bounds (PainterBatch): the greatest distance of a corner from its axis, its lowest and
 	// highest corner (the model's y, down positive)
 	private float[] upPm = new float[512], upPy0 = new float[512], upPy1 = new float[512];
@@ -667,12 +674,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				zoneThreads = Math.max(0, Math.min(java.util.concurrent.ForkJoinPool.getCommonPoolParallelism(), config.zoneThreads()));
 				if (zoneMode)
 				{
-					// a stage for the client's own thread, one for each render thread, and one spare
-					Stage[] st = new Stage[zoneThreads + 2];
+					// a stage for the client's own thread, one for each render thread, one spare, and the boats' scenery
+					// and ground (the last; prepareBoats)
+					Stage[] st = new Stage[zoneThreads + 3];
 					for (int k = 0; k < st.length; k++)
 					{
 						st[k] = new Stage();
 					}
+					boatStage = st[st.length - 1];
 					stages = st;
 					zoneWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r ->
 					{
@@ -1433,7 +1442,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		Tile[][][] tiles = sc.getExtendedTiles();
 		int plane = (int) ((hash >> TileObject.HASH_PLANE_SHIFT) & 3);
-		int ex = (x >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET, ez = (z >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET;
+		// (a boat's scene: tile 0 at index 0)
+		final int off = sc.getWorldViewId() == WorldView.TOPLEVEL ? SCENE_OFFSET : 0;
+		int ex = (x >> Perspective.LOCAL_COORD_BITS) + off, ez = (z >> Perspective.LOCAL_COORD_BITS) + off;
 		if (tiles == null || plane >= tiles.length || ex < 0 || ez < 0 || ex >= tiles[plane].length || ez >= tiles[plane][ex].length)
 		{
 			return false;
@@ -1889,6 +1900,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		zoneTemp.clear();
 		temps = 0;
 		ups = 0;
+		nBoats = 0;
 		stagedV = stagedUv = 0;
 		if (zoneMode && stages != null)
 		{
@@ -3056,6 +3068,498 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				fillFrustum(scene);
 			}
 		}
+		else if (zoneFrame && !zoneIdle && stages != null)
+		{
+			boatScene(scene, cameraX, cameraZ, minLevel, maxLevel);
+		}
+	}
+
+	// ---- Sailing's boats in zone mode (11/19/2026; claude/cpu-look-stage-b.md, "Boats") ----
+
+	/**
+	 * A boat this frame. The client draws a boat's whole scene where the main walk reaches the boat's object (a temporary
+	 * object of the top level whose renderable is the boat's scene), through the boat's own float matrix, model to
+	 * camera, which includes the boat's rocking (claude/cpu-look.md, section 9, "Sailing's boats"). preSceneDraw gives
+	 * the boat's scene, the camera in the boat's own units and the levels drawn; the matrix is read then from its world
+	 * view (getCanvasProjection: the very matrix its models and tiles are drawn through, ei.ha); drawDynamic and drawTemp
+	 * then hand over what moves on it, copied with their corners through the matrix (stageBoatModel); prepareBoats walks
+	 * the boat's scene as the client does and copies its scenery and ground; resolveBoats numbers it all in the boat's
+	 * order; the main walk then draws the whole list where it meets the boat's object (zoneEntry, zoneEntrySafe).
+	 */
+	static final class Boat
+	{
+		Scene scene;
+		final float[] matrix = new float[16];
+		int camX, camZ, minLevel, maxLevel;
+		// its temporary objects this frame (its crew and the rest on deck, drawTemp), in the order handed over
+		GameObject[] temps = new GameObject[16];
+		int nTemps;
+		final IdentityHashMap<GameObject, Boolean> tempSet = new IdentityHashMap<>();
+		// what moved on it this frame (drawDynamic): drawn as handed over, not from the scene
+		final IdentityHashMap<Object, Boolean> handed = new IdentityHashMap<>();
+		// the boat's object in the top level's scene, where the main walk draws the boat (null: not found, not drawn)
+		GameObject object;
+		// the boat's walk's draws in order, each a copy in the boats' stage (0, at its place there), a temporary object (1)
+		// or a moving model (2); then the same as uploads, numbered (resolveBoats)
+		byte[] refKind = new byte[256];
+		Object[] ref = new Object[256];
+		int[] refAt = new int[256];
+		int nRefs;
+		int[] order = new int[256];
+		int n;
+
+		void reset(Scene scene)
+		{
+			this.scene = scene;
+			Arrays.fill(temps, 0, nTemps, null);
+			nTemps = 0;
+			tempSet.clear();
+			handed.clear();
+			object = null;
+			Arrays.fill(ref, 0, nRefs, null);
+			nRefs = 0;
+			n = 0;
+		}
+
+		void addTemp(GameObject g)
+		{
+			if (nTemps == temps.length)
+			{
+				temps = Arrays.copyOf(temps, nTemps * 2);
+			}
+			temps[nTemps++] = g;
+			tempSet.put(g, Boolean.TRUE);
+		}
+
+		void addRef(int kind, Object what, int at)
+		{
+			if (nRefs == refKind.length)
+			{
+				final int c = nRefs * 2;
+				refKind = Arrays.copyOf(refKind, c);
+				ref = Arrays.copyOf(ref, c);
+				refAt = Arrays.copyOf(refAt, c);
+			}
+			refKind[nRefs] = (byte) kind;
+			ref[nRefs] = what;
+			refAt[nRefs] = at;
+			nRefs++;
+		}
+
+		void addOrder(int idx)
+		{
+			if (n == order.length)
+			{
+				order = Arrays.copyOf(order, n * 2);
+			}
+			order[n++] = idx;
+		}
+	}
+
+	// this frame's boats (written on the client's thread between the render threads' work, read by them)
+	private volatile Boat[] boats = new Boat[8];
+	private volatile int nBoats;
+	// the boats' scenery and ground, copied on the client's thread (the last of the stages)
+	private Stage boatStage;
+	// the walk inside a boat (CpuOrder.buildSub), and its draws' numbers
+	private final CpuOrder boatOrder = new CpuOrder();
+	private final int[] boatParams = new int[4];
+	// the developer's count of boats drawn and what they held, for the log, and of the matrices the crew came with
+	private int boatFrames, boatsSeen, boatsDrawn, boatDraws, boatMatrixChecks, boatMatrixSame;
+	private long lastBoatLog;
+
+	private Boat boatOf(Scene scene)
+	{
+		final Boat[] b = boats;
+		for (int k = 0, n = Math.min(nBoats, b.length); k < n; k++)
+		{
+			if (b[k] != null && b[k].scene == scene)
+			{
+				return b[k];
+			}
+		}
+		return null;
+	}
+
+	// a boat's preSceneDraw: its matrix and camera (the boat's ea, built by its scene's my just before: ei.jz)
+	private void boatScene(Scene scene, float cameraX, float cameraZ, int minLevel, int maxLevel)
+	{
+		final WorldView wv = client.getWorldView(scene.getWorldViewId());
+		final Projection p = wv != null ? wv.getCanvasProjection() : null;
+		if (!(p instanceof FloatProjection))
+		{
+			return;
+		}
+		final float[] m = ((FloatProjection) p).getProjection();
+		if (m == null || m.length < 16)
+		{
+			return;
+		}
+		Boat b = boatOf(scene);
+		if (b == null)
+		{
+			Boat[] all = boats;
+			final int n = nBoats;
+			if (n == all.length)
+			{
+				all = Arrays.copyOf(all, n * 2);
+				boats = all;
+			}
+			b = all[n];
+			if (b == null)
+			{
+				b = all[n] = new Boat();
+			}
+			b.reset(scene);
+			nBoats = n + 1;
+		}
+		System.arraycopy(m, 0, b.matrix, 0, 16);
+		// (the client's own: (int) of its float camera in the boat's units, ei.my's bo and ci)
+		b.camX = (int) cameraX;
+		b.camZ = (int) cameraZ;
+		b.minLevel = minLevel;
+		b.maxLevel = maxLevel;
+	}
+
+	// a model on a boat copied into a stage: its corners through its own turn and place and the boat's matrix (fo.mi),
+	// in camera space; its record's y the model origin's depth
+	private void stageBoatModel(Stage s, Boat boat, Scene scene, Renderable r, Model model, int orientation, int x, int y, int z,
+		long hash, Object key, boolean temp)
+	{
+		stageBoatModel(s, boat, scene, r, model, orientation, x, y, z, hash, key, temp, false);
+	}
+
+	private void stageBoatModel(Stage s, Boat boat, Scene scene, Renderable r, Model model, int orientation, int x, int y, int z,
+		long hash, Object key, boolean temp, boolean solidOnly)
+	{
+		final int i = s.add();
+		s.key[i] = key;
+		s.owner[i] = null;
+		s.temp[i] = temp;
+		s.boat[i] = boat;
+		final int count = model.getVerticesCount();
+		s.corners(count);
+		BoatMath.model(orientation, x, y, z, boat.matrix, s.mat);
+		BoatMath.corners(s.mat, model.getVerticesX(), model.getVerticesY(), model.getVerticesZ(), count, s.cx, s.cy, s.cz);
+		final boolean painter = painterModels && r != null && r.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		final boolean hasUv = SceneUploader.hasUv(model);
+		final int len = sceneUploader.pushModel(model, s.vb, s.ub, s.cx, s.cy, s.cz);
+		final int m = markOf(scene, r, x, z, hash);
+		s.off[i] = s.v;
+		s.uvOff[i] = hasUv ? s.uv : -1;
+		s.len[i] = len;
+		s.flags[i] = FLAG_CAM | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+			| (solidOnly ? FLAG_SOLID : 0);
+		s.x[i] = 0;
+		s.y[i] = BoatMath.originDepth(s.mat);
+		s.z[i] = 0;
+		s.see[i] = !solidOnly && (model.getFaceTransparencies() != null || model.getTransparency() != 0);
+		s.painter[i] = painter;
+		s.pm[i] = -1f;
+		s.v += len;
+		if (hasUv)
+		{
+			s.uv += len;
+		}
+	}
+
+	// a boat's tile's ground copied into the boats' stage (its paint or shaped model through the boat's matrix); its
+	// place there, or -1 when the client leaves it out (a corner nearer than 50) or it has none
+	private int boatGround(Boat b, Tile tile, Object key)
+	{
+		final Stage s = boatStage;
+		final int v0 = s.v, uv0 = s.uv;
+		final int len;
+		final boolean hasUv;
+		if (key instanceof SceneTilePaint)
+		{
+			final SceneTilePaint paint = (SceneTilePaint) key;
+			final net.runelite.api.Point loc = tile.getSceneLocation();
+			if (loc == null)
+			{
+				return -1;
+			}
+			len = sceneUploader.pushBoatPaint(b.scene, paint, tile.getRenderLevel(), loc.getX(), loc.getY(), b.matrix, s.vb, s.ub);
+			hasUv = paint.getTexture() != -1;
+		}
+		else
+		{
+			final SceneTileModel model = (SceneTileModel) key;
+			s.corners(model.getVertexX().length);
+			len = sceneUploader.pushBoatTileModel(model, b.matrix, s.vb, s.ub, s.cx, s.cy, s.cz);
+			hasUv = model.getTriangleTextureId() != null;
+		}
+		if (len <= 0)
+		{
+			return -1;
+		}
+		final int i = s.add();
+		s.key[i] = key;
+		s.owner[i] = null;
+		s.temp[i] = false;
+		s.boat[i] = b;
+		s.tile[i] = true;
+		s.off[i] = v0;
+		s.uvOff[i] = hasUv ? uv0 : -1;
+		s.len[i] = len;
+		s.flags[i] = FLAG_CAM | (groundHides ? FLAG_GROUND : 0);
+		s.x[i] = s.y[i] = s.z[i] = 0;
+		s.see[i] = false;
+		s.painter[i] = false;
+		s.pm[i] = -1f;
+		s.v += len;
+		if (hasUv)
+		{
+			s.uv += len;
+		}
+		return i;
+	}
+
+	// a boat's tile's level as the client tests it in the boat's walk (ei.dm: the tile's level, 0 when it's drawn with the
+	// ground level), from the boat scene's settings
+	private static int boatLevel(byte[][][] settings, int p, int x, int y)
+	{
+		if (settings == null || settings.length < 2 || x < 0 || y < 0 || x >= settings[0].length || y >= settings[0][x].length)
+		{
+			return p;
+		}
+		final int at = (settings[1][x][y] & 2) != 0 ? (p + 1) & 3 : p;
+		return at < settings.length && (settings[at][x][y] & 8) != 0 ? 0 : p;
+	}
+
+	// the boat's object in the top level's scene: the temporary object the client put on the tiles under the boat
+	// (ei.bu), whose renderable is the boat's scene; looked for round the boat's place, every level
+	private GameObject boatObject(Scene top, Boat b)
+	{
+		final WorldView topView = client.getTopLevelWorldView();
+		final Tile[][][] tiles = top.getExtendedTiles();
+		if (topView == null || tiles == null)
+		{
+			return null;
+		}
+		for (net.runelite.api.WorldEntity we : topView.worldEntities())
+		{
+			final WorldView v = we.getWorldView();
+			if (v == null || v.getId() != b.scene.getWorldViewId())
+			{
+				continue;
+			}
+			final net.runelite.api.coords.LocalPoint lp = we.getLocalLocation();
+			if (lp == null)
+			{
+				return null;
+			}
+			final int ex = (lp.getX() >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET, ey = (lp.getY() >> Perspective.LOCAL_COORD_BITS) + SCENE_OFFSET;
+			for (int d = 0; d <= 3; d++)
+			{
+				for (int p = 0; p < tiles.length; p++)
+				{
+					for (int x = ex - d; x <= ex + d; x++)
+					{
+						for (int y = ey - d; y <= ey + d; y++)
+						{
+							if (Math.max(Math.abs(x - ex), Math.abs(y - ey)) != d || x < 0 || y < 0 || x >= tiles[p].length
+								|| y >= tiles[p][x].length || tiles[p][x][y] == null)
+							{
+								continue;
+							}
+							final GameObject[] gos = tiles[p][x][y].getGameObjects();
+							if (gos == null)
+							{
+								continue;
+							}
+							for (GameObject g : gos)
+							{
+								if (g != null && g.getRenderable() == b.scene)
+								{
+									return g;
+								}
+							}
+						}
+					}
+				}
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * The boats before zoneMerge (the client's thread, every boat's draws handed over by now): what moved on each, its
+	 * object in the top level, then the client's walk inside it (CpuOrder.buildSub, its own camera and levels, its
+	 * temporary objects on its tiles) and, in that order, its ground and scenery copied into the boats' stage through the
+	 * boat's matrix, the rest noted to be found among the copies the client handed over.
+	 */
+	private void prepareBoats(Scene top)
+	{
+		final Stage bs = boatStage;
+		final int nb = nBoats;
+		final Boat[] all = boats;
+		if (bs == null || nb == 0)
+		{
+			return;
+		}
+		for (Stage st : stages)
+		{
+			if (st == bs)
+			{
+				continue;
+			}
+			for (int k = 0; k < st.n; k++)
+			{
+				final Boat b = st.boat[k];
+				if (b != null && !st.temp[k])
+				{
+					b.handed.put(st.key[k], Boolean.TRUE);
+				}
+			}
+		}
+		final int[] params = boatParams;
+		for (int k = 0; k < nb; k++)
+		{
+			final Boat b = all[k];
+			b.object = boatObject(top, b);
+			if (b.object == null)
+			{
+				continue;
+			}
+			final Scene sc = b.scene;
+			final byte[][][] settings = sc.getExtendedTileSettings();
+			final int maxLevel = b.maxLevel;
+			final CpuOrder o = boatOrder;
+			o.setTemps(b.temps, b.nTemps);
+			o.itemShown = il -> renderCallbackManager.drawObject(sc, il);
+			o.buildSub(sc, b.camX, b.camZ, b.minLevel, (p, x, y) -> boatLevel(settings, p, x, y) <= maxLevel);
+			o.setTemps(null, 0);
+			o.itemShown = null;
+			for (int e = 0; e < o.n; e++)
+			{
+				final Object key = o.keys[e], src = o.ksrc[e];
+				final byte kind = o.kkind[e];
+				if (key instanceof SceneTilePaint || key instanceof SceneTileModel)
+				{
+					if (src instanceof Tile && renderCallbackManager.drawTile(sc, (Tile) src))
+					{
+						final int at = boatGround(b, (Tile) src, key);
+						if (at >= 0)
+						{
+							b.addRef(0, null, at);
+						}
+					}
+					continue;
+				}
+				if (!(key instanceof Renderable))
+				{
+					continue;
+				}
+				if (src instanceof GameObject && b.tempSet.containsKey(src))
+				{
+					b.addRef(1, src, 0);
+					continue;
+				}
+				if (b.handed.containsKey(key))
+				{
+					b.addRef(2, key, 0);
+					continue;
+				}
+				// the boat's own scenery: from its model as it stands (a DynamicObject the client didn't hand over: its
+				// model at rest, as zoneEntry draws the top level's)
+				if (src instanceof TileObject && !renderCallbackManager.drawObject(sc, (TileObject) src))
+				{
+					continue;
+				}
+				final Renderable r = (Renderable) key;
+				final Model model = r instanceof Model ? (Model) r
+					: r instanceof net.runelite.api.DynamicObject ? ((net.runelite.api.DynamicObject) r).getModelZbuf() : r.getModel();
+				if (model == null)
+				{
+					continue;
+				}
+				final long hash = FastOrder.draw(key, src, kind, params);
+				if (params[0] < 0)
+				{
+					continue;
+				}
+				final int at = bs.n;
+				stageBoatModel(bs, b, sc, r, model, params[0], params[1], params[2], params[3], hash, key, false,
+					(kind & FastOrder.K_SOLID) != 0);
+				b.addRef(0, null, at);
+			}
+		}
+	}
+
+	// after zoneMerge: each boat's draws as uploads, in its order
+	private void resolveBoats()
+	{
+		final int nb = nBoats;
+		final Boat[] all = boats;
+		final Stage bs = boatStage;
+		for (int k = 0; k < nb; k++)
+		{
+			final Boat b = all[k];
+			b.n = 0;
+			if (b.object == null)
+			{
+				continue;
+			}
+			for (int e = 0; e < b.nRefs; e++)
+			{
+				final Integer up;
+				switch (b.refKind[e])
+				{
+					case 0:
+						up = bs.idx[b.refAt[e]];
+						break;
+					case 1:
+						up = zoneTemp.get((GameObject) b.ref[e]);
+						break;
+					default:
+						up = zoneDyn.get((Renderable) b.ref[e]);
+						break;
+				}
+				if (up != null && up >= 0)
+				{
+					b.addOrder(up);
+				}
+			}
+			if (Build.DEVELOPER)
+			{
+				boatsDrawn++;
+				boatDraws += b.n;
+			}
+		}
+		if (Build.DEVELOPER && nb > 0)
+		{
+			boatsSeen += nb;
+			boatFrames++;
+			final long now = System.nanoTime();
+			if (now - lastBoatLog > 5_000_000_000L)
+			{
+				lastBoatLog = now;
+				log.info("Bitcrush boats, in the last five seconds: {} frames with boats, {} boats handed over, {} found in the top level and drawn, {} draws in them; the crew's matrices the same as preSceneDraw's: {} of {}",
+					boatFrames, boatsSeen, boatsDrawn, boatDraws, boatMatrixSame, boatMatrixChecks);
+				boatFrames = boatsSeen = boatsDrawn = boatDraws = boatMatrixChecks = boatMatrixSame = 0;
+			}
+		}
+	}
+
+	// the main walk's entry for a boat's object: the boat's draws, in its own order (false: not a boat of this frame's)
+	private boolean drawBoat(Object key)
+	{
+		if (!(key instanceof Scene))
+		{
+			return false;
+		}
+		final Boat b = boatOf((Scene) key);
+		if (b == null)
+		{
+			return true;  // a boat the client didn't draw this frame: nothing
+		}
+		for (int e = 0; e < b.n; e++)
+		{
+			zoneQueue(b.order[e]);
+		}
+		return true;
 	}
 
 	private Scene zoneScene;
@@ -3099,7 +3603,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	public void drawDynamic(int renderThreadId, Projection worldProjection, Scene scene, TileObject tileObject, Renderable r,
 		Model m, int orient, int x, int y, int z)
 	{
-		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+		// (a boat's: its scene's preSceneDraw came first, with the boat's matrix)
+		final Boat boat = scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL ? boatOf(scene) : null;
+		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL && boat == null || m == null
 			|| !renderCallbackManager.drawObject(scene, tileObject))
 		{
 			return;
@@ -3110,11 +3616,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 		// the client's own thread is -1, its render threads 0 and up: each its own stage, so none waits for another
-		final Stage stage = st[Math.max(0, Math.min(st.length - 1, renderThreadId + 1))];
+		// (the last stage is the boats' own)
+		final Stage stage = st[Math.max(0, Math.min(st.length - 2, renderThreadId + 1))];
 		synchronized (stage)
 		{
 			final long t0 = timing ? System.nanoTime() : 0;
-			stageUpload(stage, scene, r, m, orient, x, y, z, tileObject.getHash(), r, false);
+			stageUpload(stage, scene, r, m, orient, x, y, z, tileObject.getHash(), r, false, boat);
 			// (an item pile's items come this way in zone mode: their pile kept for the walk)
 			stage.owner[stage.n - 1] = tileObject;
 			if (timing)
@@ -3127,7 +3634,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawTemp(Projection worldProjection, Scene scene, GameObject gameObject, Model m, int orient, int x, int y, int z)
 	{
-		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+		final Boat boat = scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL ? boatOf(scene) : null;
+		if (!zoneFrame || zoneIdle || scene.getWorldViewId() != WorldView.TOPLEVEL && boat == null || m == null
 			|| !renderCallbackManager.drawObject(scene, gameObject))
 		{
 			return;
@@ -3143,12 +3651,27 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		synchronized (stage)
 		{
 			final long t0 = timing ? System.nanoTime() : 0;
-			if (temps == tempG.length)
+			if (boat != null)
 			{
-				tempG = Arrays.copyOf(tempG, temps * 2);
+				// a boat's crew and the rest on its deck: the boat's own walk puts them on its tiles
+				boat.addTemp(gameObject);
+				if (Build.DEVELOPER && worldProjection instanceof FloatProjection)
+				{
+					// (the developer's check: the matrix the client draws them through is the one read at preSceneDraw; on
+					// the client's own thread, as getProjection's array is the client's one shared array)
+					boatMatrixChecks++;
+					boatMatrixSame += Arrays.equals(((FloatProjection) worldProjection).getProjection(), boat.matrix) ? 1 : 0;
+				}
 			}
-			tempG[temps++] = gameObject;
-			stageUpload(stage, scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash(), gameObject, true);
+			else
+			{
+				if (temps == tempG.length)
+				{
+					tempG = Arrays.copyOf(tempG, temps * 2);
+				}
+				tempG[temps++] = gameObject;
+			}
+			stageUpload(stage, scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash(), gameObject, true, boat);
 			if (timing)
 			{
 				timer.zoneCopy(System.nanoTime() - t0, true);
@@ -3179,6 +3702,25 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		float[] pm = new float[64], py0 = new float[64], py1 = new float[64];
 		// where its vertices and texture points start in the frame's temporary buffers (set by zoneMerge)
 		int base, uvBase;
+		// a boat's copy (11/19/2026): its boat (null on the top level), whether it's the boat's ground, its upload's
+		// number once zoneMerge has numbered them (-1: out of view)
+		Boat[] boat = new Boat[64];
+		boolean[] tile = new boolean[64];
+		int[] idx = new int[64];
+		// the corners through a boat's matrix, and the model's matrix (BoatMath), this stage's own
+		float[] cx = new float[256], cy = new float[256], cz = new float[256];
+		final float[] mat = new float[16];
+
+		void corners(int count)
+		{
+			if (cx.length < count)
+			{
+				int c = Math.max(count, cx.length * 2);
+				cx = new float[c];
+				cy = new float[c];
+				cz = new float[c];
+			}
+		}
 
 		void clear()
 		{
@@ -3187,6 +3729,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			v = uv = n = 0;
 			Arrays.fill(key, null);
 			Arrays.fill(owner, null);
+			Arrays.fill(boat, null);
 		}
 
 		int add()
@@ -3209,7 +3752,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				pm = Arrays.copyOf(pm, k);
 				py0 = Arrays.copyOf(py0, k);
 				py1 = Arrays.copyOf(py1, k);
+				boat = Arrays.copyOf(boat, k);
+				tile = Arrays.copyOf(tile, k);
+				idx = Arrays.copyOf(idx, k);
 			}
+			boat[n] = null;
+			tile[n] = false;
 			return n++;
 		}
 	}
@@ -3224,8 +3772,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	// a moving model copied into its thread's stage now (the drawRenderable's temporary branch, its first half)
 	private void stageUpload(Stage s, Scene scene, Renderable r, Model model, int orientation, int x, int y, int z, long hash,
-		Object key, boolean temp)
+		Object key, boolean temp, Boat boat)
 	{
+		if (boat != null)
+		{
+			stageBoatModel(s, boat, scene, r, model, orientation, x, y, z, hash, key, temp);
+			return;
+		}
 		final int i = s.add();
 		s.key[i] = key;
 		s.owner[i] = null;
@@ -3313,6 +3866,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 						upPm = Arrays.copyOf(upPm, c);
 						upPy0 = Arrays.copyOf(upPy0, c);
 						upPy1 = Arrays.copyOf(upPy1, c);
+						upTile = Arrays.copyOf(upTile, c);
 					}
 					idx = ups++;
 					upOff[idx] = splitV + s.base + s.off[k];
@@ -3327,6 +3881,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					upPm[idx] = s.pm[k];
 					upPy0[idx] = s.py0[k];
 					upPy1[idx] = s.py1[k];
+					upTile[idx] = s.tile[k];
+				}
+				s.idx[k] = idx;
+				if (s == boatStage)
+				{
+					// a boat's own scenery and ground, found again by their place in this stage (resolveBoats)
+					continue;
 				}
 				if (s.temp[k])
 				{
@@ -3336,7 +3897,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				{
 					zoneDyn.put((Renderable) s.key[k], idx);
 					final Object owner = s.owner[k];
-					if (owner instanceof net.runelite.api.ItemLayer && (nItemLayers == 0 || itemLayers[nItemLayers - 1] != owner))
+					// (a boat's item piles are the boat walk's, which reads them from its tiles)
+					if (s.boat[k] == null && owner instanceof net.runelite.api.ItemLayer && (nItemLayers == 0 || itemLayers[nItemLayers - 1] != owner))
 					{
 						if (nItemLayers == itemLayers.length)
 						{
@@ -3423,6 +3985,23 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		final int len = upLen[i];
 		final int before = targetBufferOffset;
+		if (upTile[i])
+		{
+			// a boat's ground (its tile's paint or shaped model, corners in camera space): the ground's compute pass
+			GpuIntBuffer b = modelBufferUnordered;
+			++unorderedModels;
+			tierFaces[0] += len / 3;
+			b.ensureCapacity(8);
+			IntBuffer buffer = b.getBuffer();
+			buffer.put(upOff[i]);
+			buffer.put(upUv[i]);
+			buffer.put(len / 3);
+			buffer.put(targetBufferOffset);
+			buffer.put(upFlags[i]);
+			buffer.put(upX[i]).put(upY[i]).put(upZ[i]);
+			targetBufferOffset += len;
+			return;
+		}
 		GpuIntBuffer b = bufferForTriangles(len / 3);
 		b.ensureCapacity(8);
 		IntBuffer buffer = b.getBuffer();
@@ -3439,8 +4018,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if (upPainter[i] && len > 0)
 		{
-			// hill-skewed models (not players or NPCs) are bent on the card: their bounds unknown here
-			if ((upFlags[i] & (1 << 26)) == 0)
+			// hill-skewed models (not players or NPCs) are bent on the card, a boat's crew turned by the boat's matrix:
+			// their bounds unknown here (each drawn on its own)
+			if ((upFlags[i] & ((1 << 26) | FLAG_CAM)) == 0)
 			{
 				painterRange(before, len, upX[i], upY[i], upZ[i], upPm[i], upPy0[i], upPy1[i]);
 			}
@@ -3562,7 +4142,23 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
+		prepareBoats(scene);
 		zoneMerge();
+		resolveBoats();
+		// each boat's object on the top level's tiles, where the main walk draws the boat, as the client's own walk finds
+		// it among the temporary objects
+		for (int k = 0, nb = nBoats; k < nb; k++)
+		{
+			final GameObject g = boats[k].object;
+			if (g != null)
+			{
+				if (temps == tempG.length)
+				{
+					tempG = Arrays.copyOf(tempG, temps * 2);
+				}
+				tempG[temps++] = g;
+			}
+		}
 		final int[][][] roofs = scene.getRoofs();
 		final byte[][][] settings = scene.getExtendedTileSettings();
 		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
@@ -3772,6 +4368,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// a temporary object, item or moving model as copied when the client handed it over; false for anything else
 	private boolean zoneEntrySafe(Object key, Object src)
 	{
+		if (drawBoat(key))
+		{
+			return true;
+		}
 		if (!(key instanceof Renderable))
 		{
 			return false;
@@ -4608,6 +5208,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					drawSceneTileModel0(scene, (SceneTileModel) key, loc.getX(), loc.getY());
 				}
 			}
+			if (timing)
+			{
+				timer.callback(t0);
+			}
+			return;
+		}
+		if (drawBoat(key))
+		{
 			if (timing)
 			{
 				timer.callback(t0);

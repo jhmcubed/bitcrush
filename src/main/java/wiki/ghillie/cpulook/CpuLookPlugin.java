@@ -127,7 +127,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// render mode 2, "sorted, no depth" (players and most NPCs): its corners marked 0x200000 by the compute pass, its solid
 	// faces drawn a model at a time as the CPU draws them (geom.glsl's painterPass)
 	private static final int FLAG_PAINTER = 1 << 29;
+	// drawn in the CPU's solid pass only (FastOrder.K_SOLID: what lies under a bridge beyond its ground, first wall half
+	// and objects): its corners marked 0x80000 by the compute pass, its see-through faces never drawn
+	private static final int FLAG_SOLID = 1 << 30;
+	// zoneEntry's draw of such an entry in full (drawRenderable's flags)
+	private boolean drawSolidOnly;
 	private static final int MARK_PAINTER = 0x200000;
+	private static final int MARK_SOLID = 0x80000;
 	private static final int MARK_GROUND = 0x400000;
 	private static final int MARK_FREE = 0x800000;
 	// a ground tile, always (the CPU textures tiles with its own routine; the compute pass marks them itself)
@@ -4192,7 +4198,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		final int x = params[1], y = params[2], z = params[3];
 		model.calculateBoundsCylinder();
-		final boolean see = model.getFaceTransparencies() != null || model.getTransparency() != 0;
+		final boolean solid = (kind & FastOrder.K_SOLID) != 0;
+		final boolean see = !solid && (model.getFaceTransparencies() != null || model.getTransparency() != 0);
 		final boolean painter = painterModels && model.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		final int plane = (int) ((hash >> TileObject.HASH_PLANE_SHIFT) & 3);
 		final boolean hillskew = offsetModel != model;
@@ -4201,7 +4208,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at + 1] = offsetModel.getUvBufferOffset();
 		out[at + 2] = Math.min(MAX_TRIANGLE, offsetModel.getFaceCount());
 		out[at + 3] = FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | params[0]
-			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0) | (solid ? FLAG_SOLID : 0);
 		out[at + 4] = x;
 		out[at + 5] = y;
 		out[at + 6] = z;
@@ -4336,14 +4343,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at] = len;
 		out[at + 1] = hasUv ? 1 : 0;
 		out[at + 2] = 0;
-		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+			| ((kind & FastOrder.K_SOLID) != 0 ? FLAG_SOLID : 0);
 		out[at + 4] = x;
 		out[at + 5] = y;
 		out[at + 6] = z;
 		out[at + 7] = still.getXYZMag();
 		out[at + 8] = still.getBottomY();
 		out[at + 9] = still.getModelHeight();
-		out[at + 10] = RB_PUSHED | (see ? RB_SEE : 0) | (painter ? RB_PAINTER : 0) | (shown ? 0 : RB_NONE);
+		out[at + 10] = RB_PUSHED | (see && (kind & FastOrder.K_SOLID) == 0 ? RB_SEE : 0) | (painter ? RB_PAINTER : 0) | (shown ? 0 : RB_NONE);
 		out[at + 11] = data;
 		return true;
 	}
@@ -4650,8 +4658,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int before = targetBufferOffset;
 		drawnSeeThrough = false;
 		drawnPainter = false;
-		drawRenderable(null, scene, r, still, o, x, y, z, hash);
-		if (drawnSeeThrough && targetBufferOffset > before)
+		drawSolidOnly = (kind & FastOrder.K_SOLID) != 0;
+		try
+		{
+			drawRenderable(null, scene, r, still, o, x, y, z, hash);
+		}
+		finally
+		{
+			drawSolidOnly = false;
+		}
+		if (drawnSeeThrough && (kind & FastOrder.K_SOLID) == 0 && targetBufferOffset > before)
 		{
 			seeRange(before, targetBufferOffset - before);
 		}
@@ -5250,6 +5266,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			int m = markOf(scene, renderable, x, z, hash);
 			mark(start, m, m != 0);
 			mark(start, MARK_PAINTER, painter);
+			mark(start, MARK_SOLID, drawSolidOnly);
 			noteDraw(renderable, x, z, null, -1, targetBufferOffset - start, start);
 		}
 		// Model may be in the scene buffer
@@ -5289,7 +5306,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
 			buffer.put(FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | orientation
-				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0));
+				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+				| (drawSolidOnly ? FLAG_SOLID : 0));
 			buffer.put(x).put(y).put(z);
 
 			targetBufferOffset += tc * 3;
@@ -5336,7 +5354,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(len / 3);
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
-			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0));
+			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+				| (drawSolidOnly ? FLAG_SOLID : 0));
 			buffer.put(x).put(y).put(z);
 			noteDraw(renderable, x, z, b, pos, len, -1);
 

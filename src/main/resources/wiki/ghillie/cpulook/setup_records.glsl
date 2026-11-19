@@ -131,6 +131,10 @@ void main() {
   bool listB = twoLists == 1 && alpha > 0;
   // a render mode 2 model's solid faces (0x200000: players, most NPCs) are drawn by the geometry stage, a model at a
   // time, after the solid list (geom.glsl's painterPass says how); their see-through faces stay in list B
+  // what the CPU draws in its solid pass only (0x80000: under a bridge, CpuLookPlugin.FLAG_SOLID): never a see-through face
+  if (alpha > 0 && (vin[i * 3].ahsl & 0x80000) != 0) {
+    n = 0;
+  }
   if (twoLists == 1 && alpha == 0 && (vin[i * 3].ahsl & 0x200000) != 0) {
     n = 0;
   }

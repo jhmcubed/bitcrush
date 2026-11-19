@@ -503,6 +503,21 @@ final class CpuOrder
 			if (bw != null)
 			{
 				emit(bw.getRenderable1(), bw.getX(), bw.getY());
+				// the rest of what lies under a bridge, which the CPU's solid pass draws there and its see-through pass
+				// doesn't (FastOrder.Bridge; drawn solid only): the wall's second half, then below its wall decoration
+				// and its ground decoration (11/19/2026: the GE's dark rocks)
+				emit(bw.getRenderable2(), bw.getX(), bw.getY());
+			}
+			DecorativeObject bd = bridge.getDecorativeObject();
+			if (bd != null)
+			{
+				emit(bd.getRenderable(), bd.getX(), bd.getY());
+				emit(bd.getRenderable2(), bd.getX(), bd.getY());
+			}
+			GroundObject bg = bridge.getGroundObject();
+			if (bg != null)
+			{
+				emit(bg.getRenderable(), bg.getX(), bg.getY());
 			}
 			GameObject[] bos = bridge.getGameObjects();
 			if (bos != null)

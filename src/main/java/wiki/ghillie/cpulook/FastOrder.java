@@ -273,6 +273,9 @@ final class FastOrder
 	}
 
 	static final byte K_GROUND = 0, K_WALL1 = 1, K_WALL2 = 2, K_DECOR1 = 3, K_DECOR2 = 4, K_GOBJ = 5, K_ITEM = 6, K_OBJ = 7;
+	// with a kind: drawn in the CPU's solid pass only, its see-through faces never (what lies under a bridge beyond its
+	// ground, first wall half and objects: Bridge)
+	static final byte K_SOLID = 16;
 
 	/**
 	 * Entry k as the client's tile draw hands it to a renderer (claude/cpu-look-stage-b.md, 5b; the client's getters read
@@ -288,7 +291,7 @@ final class FastOrder
 	{
 		final net.runelite.api.Renderable r = key instanceof net.runelite.api.Renderable ? (net.runelite.api.Renderable) key : null;
 		final int lift = r != null ? r.getAnimationHeightOffset() : 0;
-		switch (kind)
+		switch (kind & 15)
 		{
 			case K_WALL1:
 			case K_WALL2:
@@ -305,7 +308,7 @@ final class FastOrder
 			case K_DECOR2:
 			{
 				DecorativeObject d = (DecorativeObject) src;
-				boolean second = kind == K_DECOR2;
+				boolean second = (kind & 15) == K_DECOR2;
 				out[0] = 0;
 				out[1] = d.getX() + (second ? d.getXOffset2() : d.getXOffset());
 				out[2] = d.getZ() - lift;
@@ -1263,17 +1266,24 @@ final class FastOrder
 
 	/**
 	 * What lies under a bridge (the tile the client moved down, Tile.getBridge), read with the tile: its ground, its
-	 * wall and its objects, as the sweep draws them first on the tile above (CpuOrder.first). rec: each one's prepared
-	 * draw (zone mode; ground 0, wall 1, the objects from 2), -1 for none. Read when its tile is (11/19/2026: read every
-	 * frame from the client before, which zone mode's own thread mustn't).
+	 * wall and its objects, as the sweep draws them first on the tile above (CpuOrder.first); and, drawn in the solid
+	 * pass only (K_SOLID), its wall's second half, its wall decoration and its ground decoration, which the CPU's solid
+	 * pass draws there (ei.qh draws the tile under a bridge as any tile) and its see-through pass doesn't (ei.qt: the
+	 * ground, the wall's first half, the objects; 11/19/2026: the GE's dark rocks, ground decorations under its floor's
+	 * bridge, drawn by the CPU and missing in CPU Look). rec: each one's prepared draw (zone mode; ground 0, wall 1, the
+	 * wall's second half 2, the wall decoration's halves 3 and 4, the ground decoration 5, the objects from 6), -1 for
+	 * none. Read when its tile is (11/19/2026: read every frame from the client before, which zone mode's own thread
+	 * mustn't).
 	 */
 	static final class Bridge
 	{
 		Tile tile;
 		Object ground;
-		Object wall;
+		Object wall, wall2, decor1, decor2, gdecor;
 		WallObject wallObject;
-		int wallX, wallY, n;
+		DecorativeObject decorObject;
+		GroundObject groundObject;
+		int wallX, wallY, decorX, decorY, gdecorX, gdecorY, n;
 		Object[] objects = new Object[0];
 		GameObject[] gameObjects = new GameObject[0];
 		int[] objX = new int[0], objY = new int[0];
@@ -1293,9 +1303,27 @@ final class FastOrder
 		if (w != null)
 		{
 			br.wall = w.getRenderable1();
+			br.wall2 = w.getRenderable2();
 			br.wallObject = w;
 			br.wallX = w.getX();
 			br.wallY = w.getY();
+		}
+		DecorativeObject d = t.getDecorativeObject();
+		if (d != null)
+		{
+			br.decor1 = d.getRenderable();
+			br.decor2 = d.getRenderable2();
+			br.decorObject = d;
+			br.decorX = d.getX();
+			br.decorY = d.getY();
+		}
+		GroundObject g0 = t.getGroundObject();
+		if (g0 != null)
+		{
+			br.gdecor = g0.getRenderable();
+			br.groundObject = g0;
+			br.gdecorX = g0.getX();
+			br.gdecorY = g0.getY();
 		}
 		GameObject[] gos = t.getGameObjects();
 		if (gos != null)
@@ -1316,7 +1344,7 @@ final class FastOrder
 				}
 			}
 		}
-		br.rec = new int[2 + br.n];
+		br.rec = new int[6 + br.n];
 		Arrays.fill(br.rec, -1);
 		return br;
 	}
@@ -1401,11 +1429,27 @@ final class FastOrder
 			{
 				br.rec[1] = pr.prepare(br.wall, br.wallObject, K_WALL1);
 			}
+			if (br.wall2 != null)
+			{
+				br.rec[2] = pr.prepare(br.wall2, br.wallObject, (byte) (K_WALL2 | K_SOLID));
+			}
+			if (br.decor1 != null)
+			{
+				br.rec[3] = pr.prepare(br.decor1, br.decorObject, (byte) (K_DECOR1 | K_SOLID));
+			}
+			if (br.decor2 != null)
+			{
+				br.rec[4] = pr.prepare(br.decor2, br.decorObject, (byte) (K_DECOR2 | K_SOLID));
+			}
+			if (br.gdecor != null)
+			{
+				br.rec[5] = pr.prepare(br.gdecor, br.groundObject, (byte) (K_GOBJ | K_SOLID));
+			}
 			for (int j = 0; j < br.n; j++)
 			{
 				if (br.objects[j] != null)
 				{
-					br.rec[2 + j] = pr.prepare(br.objects[j], br.gameObjects[j], K_OBJ);
+					br.rec[6 + j] = pr.prepare(br.objects[j], br.gameObjects[j], K_OBJ);
 				}
 			}
 		}
@@ -1786,9 +1830,13 @@ final class FastOrder
 			final Bridge br = bridgeAt[t];
 			emitBridge(br, 0, br.ground, (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, br.tile, K_GROUND);
 			emitBridge(br, 1, br.wall, br.wallX, br.wallY, br.wallObject, K_WALL1);
+			emitBridge(br, 2, br.wall2, br.wallX, br.wallY, br.wallObject, (byte) (K_WALL2 | K_SOLID));
+			emitBridge(br, 3, br.decor1, br.decorX, br.decorY, br.decorObject, (byte) (K_DECOR1 | K_SOLID));
+			emitBridge(br, 4, br.decor2, br.decorX, br.decorY, br.decorObject, (byte) (K_DECOR2 | K_SOLID));
+			emitBridge(br, 5, br.gdecor, br.gdecorX, br.gdecorY, br.groundObject, (byte) (K_GOBJ | K_SOLID));
 			for (int j = 0; j < br.n; j++)
 			{
-				emitBridge(br, 2 + j, br.objects[j], br.objX[j], br.objY[j], br.gameObjects[j], K_OBJ);
+				emitBridge(br, 6 + j, br.objects[j], br.objX[j], br.objY[j], br.gameObjects[j], K_OBJ);
 			}
 		}
 		final boolean hasGround = (has & H_GROUND) != 0;

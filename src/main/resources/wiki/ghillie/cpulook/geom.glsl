@@ -117,6 +117,8 @@ void main() {
   // a fully see-through face draws nothing and leaves the depth key alone (11/18/2026: an invisible NPC's box round a
   // bloodwood tree's bucket hid the bucket in CPU Look, where the CPU draws it)
   if (alpha >= 255) return;
+  // what the CPU draws in its solid pass only (0x80000, under a bridge): never its see-through faces
+  if (alpha > 0 && (gAhsl[0] & 0x80000) != 0) return;
   // the CPU's see-through faces are tested against the depth key but never write it (11/18/2026: an invisible NPC's
   // box round a bloodwood tree's bucket, partly see-through, hid the bucket and the trunk's foot whenever it came
   // first in the order, where the CPU draws them): solid faces in one pass, then see-through ones over them

@@ -2841,9 +2841,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
+		final long t0 = timing ? System.nanoTime() : 0;
 		synchronized (zoneLock)
 		{
 			zoneDyn.put(r, zoneUpload(scene, r, m, orient, x, y, z, tileObject.getHash()));
+		}
+		if (timing)
+		{
+			timer.zoneCopy(System.nanoTime() - t0);
 		}
 	}
 
@@ -2855,6 +2860,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
+		final long t0 = timing ? System.nanoTime() : 0;
 		synchronized (zoneLock)
 		{
 			if (temps == tempG.length)
@@ -2863,6 +2869,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 			tempG[temps++] = gameObject;
 			zoneTemp.put(gameObject, zoneUpload(scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash()));
+		}
+		if (timing)
+		{
+			timer.zoneCopy(System.nanoTime() - t0);
 		}
 	}
 

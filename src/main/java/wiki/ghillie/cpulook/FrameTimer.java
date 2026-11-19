@@ -100,6 +100,9 @@ class FrameTimer
 	private long recordsSolid, recordsSee;
 	// CPU Look working out the CPU's order itself (the re-sort diagnostic's CpuOrder.build): time, draws, frames
 	private long orderNs, orderDraws, orderReadNs, orderViewNs, orderSweepNs;
+	// zone mode (stage B): the moving models copied inside the client's drawTemp and drawDynamic, and how many
+	private long zoneCopyNs, zoneCopies;
+	private boolean zoneFrames;
 	private int orderFrames, orderChecked, orderDiffered;
 	private int recordReads;
 
@@ -160,6 +163,14 @@ class FrameTimer
 
 	// the re-sort diagnostic worked out the CPU's order this frame, in ns, for n draws
 	// the walk's parts: reading the scene (stage B would do it once at load), which tiles are in view, the sweep
+	// zone mode: one copy of a moving model, inside the client's own call (any thread)
+	synchronized void zoneCopy(long ns)
+	{
+		zoneCopyNs += ns;
+		zoneCopies++;
+		zoneFrames = true;
+	}
+
 	void order(long ns, int n, long readNs, long viewNs, long sweepNs)
 	{
 		orderNs += ns;
@@ -404,11 +415,14 @@ class FrameTimer
 			walk / n / 1e6, callbacks / n / 1e6, draws / n,
 			post / n / 1e6, drawing / n / 1e6, upload / n / 1e6, sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
 			triangles / n,
-			orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
+			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below) and its copying of the "
+				+ "moving models the client hands over %.2f (%.0f models), so the client's own %.2f",
+				zoneCopyNs / n / 1e6, zoneCopies / n, (walk - zoneCopyNs - (orderFrames > 0 ? orderNs * n / orderFrames : 0)) / n / 1e6) : "")
+			+ (orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
 				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene %.2f, which tiles are in view %.2f, the sweep "
 				+ "%.2f), checked against the reference walk in %d frames, %d differing", orderNs / (double) orderFrames / 1e6,
 				orderDraws / (double) orderFrames, orderReadNs / (double) orderFrames / 1e6, orderViewNs / (double) orderFrames / 1e6,
-				orderSweepNs / (double) orderFrames / 1e6, orderChecked, orderDiffered) : ""));
+				orderSweepNs / (double) orderFrames / 1e6, orderChecked, orderDiffered) : "")));
 		StringBuilder tiers = new StringBuilder();
 		for (int t = 0; t < TIERS.length; t++)
 		{
@@ -432,6 +446,8 @@ class FrameTimer
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
+		zoneCopyNs = zoneCopies = 0;
+		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);
 		Arrays.fill(gpuN, 0);
@@ -528,6 +544,8 @@ class FrameTimer
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
+		zoneCopyNs = zoneCopies = 0;
+		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);
 		Arrays.fill(gpuN, 0);

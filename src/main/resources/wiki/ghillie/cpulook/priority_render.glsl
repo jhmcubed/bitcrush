@@ -136,25 +136,28 @@ void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool
   vert a, b, c;
   load_face(localId, minfo, a, b, c);
   if (localId < minfo.size) {
-    prio = (a.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
-    if ((minfo.flags & CAM_SPACE) != 0) {
-      // a model on a boat (fo.mi, then bi): each corner's depth is (int) of its camera z less the model origin's, which
-      // the client takes from the same matrix, (int) of its z (CpuLookPlugin's boat upload puts it in y)
-      dis = cpu_tdiv((int(a.pos.z) - minfo.y) + (int(b.pos.z) - minfo.y) + (int(c.pos.z) - minfo.y), 3);
-      visible = face_visible_cam(a.pos, b.pos, c.pos);
-    } else {
-      dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
-      visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
-    }
     // The CPU's order of a model's faces (its model draw, fo.java 1.13.7, read 11/19/2026 for the ToA fire's core): only
     // render mode 2 models (players, most NPCs: the painter mark, bit 29) are drawn with their faces' priorities (ei(true),
     // bt). Every other model's solid faces go in their own order, by index (the solid pass, mode 3, bq), and its
     // see-through faces by depth alone, the farthest first, at the same depth the lower index first (the see-through
-    // pass, mode 1, ei(false)): one stretch, the solid faces first (each list keeps only its own faces' order)
-    if (((minfo.flags >> 29) & 1) == 0) {
-      prio = 0;
-      if (((a.ahsl >> 24) & 0xff) == 0) {
-        dis = 32767;
+    // pass, mode 1, ei(false)): one stretch, the solid faces first (each list keeps only its own faces' order). Such a
+    // model needs neither its solid faces' depths nor any face's facing (the priorities' averages): left out
+    bool painter = ((minfo.flags >> 29) & 1) != 0;
+    prio = painter ? (a.ahsl >> 16) & 0xf : 0;  // all vertices on the face have the same priority
+    visible = false;
+    if (!painter && ((a.ahsl >> 24) & 0xff) == 0) {
+      dis = 32767;
+    } else if ((minfo.flags & CAM_SPACE) != 0) {
+      // a model on a boat (fo.mi, then bi): each corner's depth is (int) of its camera z less the model origin's, which
+      // the client takes from the same matrix, (int) of its z (CpuLookPlugin's boat upload puts it in y)
+      dis = cpu_tdiv((int(a.pos.z) - minfo.y) + (int(b.pos.z) - minfo.y) + (int(c.pos.z) - minfo.y), 3);
+      if (painter) {
+        visible = face_visible_cam(a.pos, b.pos, c.pos);
+      }
+    } else {
+      dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
+      if (painter) {
+        visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
       }
     }
   } else {
@@ -164,27 +167,23 @@ void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool
   }
 }
 
-void add_face_prio_distance(uint localId, modelinfo minfo, bool visible, int thisPriority, int thisDistance) {
-  if (localId < minfo.size) {
-    // if the face is not culled, it is calculated into priority distance averages
-    if (visible) {
-      atomicAdd(totalNum[thisPriority], 1);
-      atomicAdd(totalDistance[thisPriority], thisDistance);
-
-      // calculate minimum distance to any face of priority 10 for positioning the 11 faces later
-      if (thisPriority == 10) {
-        atomicMin(min10, thisDistance);
-      }
+// The priorities' totals for their averages (render mode 2 models only: comp.glsl), a run of a thread's faces with
+// the same priority added at once (11/19/2026: every face had its own shared atomics on a dozen counters, which queue
+// on the card one at a time when they meet; the sums are the same)
+void add_priority_run(int p, int n, int d, int lowest) {
+  if (n > 0) {
+    atomicAdd(totalNum[p], n);
+    atomicAdd(totalDistance[p], d);
+    // the least distance to a face of priority 10, for placing the 11s
+    if (p == 10) {
+      atomicMin(min10, lowest);
     }
   }
 }
 
-int map_face_priority(uint localId, modelinfo minfo, int thisPriority, int thisDistance, out int prio) {
-  int size = minfo.size;
-
-  // Compute average distances for 0/2, 3/4, and 6/8
-
-  if (localId < size) {
+// A face's adjusted priority: its priority, and for 10 and 11 where it falls among the averages of 0/2, 3/4 and 6/8
+int adjusted_priority(uint localId, modelinfo minfo, int thisPriority, int thisDistance) {
+  if (localId < minfo.size) {
     int avg1 = -6000;
     int avg2 = -6000;
     int avg3 = -6000;
@@ -201,14 +200,8 @@ int map_face_priority(uint localId, modelinfo minfo, int thisPriority, int thisD
       avg3 = cpu_fdiv(totalDistance[6] + totalDistance[8], totalNum[6] + totalNum[8]);
     }
 
-    int adjPrio = priority_map(thisPriority, thisDistance, min10, avg1, avg2, avg3);
-    int prioIdx = atomicAdd(totalMappedNum[adjPrio], 1);
-
-    prio = adjPrio;
-    return prioIdx;
+    return priority_map(thisPriority, thisDistance, min10, avg1, avg2, avg3);
   }
-
-  prio = 0;
   return 0;
 }
 

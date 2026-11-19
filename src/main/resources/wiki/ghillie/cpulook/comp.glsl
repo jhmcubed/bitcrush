@@ -60,6 +60,10 @@ void main() {
     return;
   }
 
+  // render mode 2 (players, most NPCs): sorted by their faces' priorities; every other model by its faces' order and
+  // its see-through faces' depths (face_key), all of it one stretch (adjusted priority 2, priority_map's for 0)
+  bool painter = ((minfo.flags >> 29) & 1) != 0;
+
   if (localId == 0) {
     min10 = 6000;
     for (int i = 0; i < 12; ++i) {
@@ -68,6 +72,9 @@ void main() {
     }
     for (int i = 0; i < 18; ++i) {
       totalMappedNum[i] = 0;
+    }
+    if (!painter) {
+      totalMappedNum[2] = minfo.size;
     }
   }
 
@@ -81,31 +88,80 @@ void main() {
     face_key(localId + i, minfo, prio[i], dis[i], vis[i]);
   }
 
-  memoryBarrierShared();
-  barrier();
-
-  for (int i = 0; i < FACES_PER_THREAD; i++) {
-    add_face_prio_distance(localId + i, minfo, vis[i], prio[i], dis[i]);
-  }
-
-  memoryBarrierShared();
-  barrier();
-
   int prioAdj[FACES_PER_THREAD];
-  int idx[FACES_PER_THREAD];
-  for (int i = 0; i < FACES_PER_THREAD; i++) {
-    idx[i] = map_face_priority(localId + i, minfo, prio[i], dis[i], prioAdj[i]);
+  if (!painter) {
+    // (11/19/2026) each face's key in its own place: no totals, no counters handing out places. The sort puts the
+    // stretch in the same order whatever order the keys start in, as every key is different (the face number is in
+    // it), so every face lands where the counters' places would have put it
+    for (int i = 0; i < FACES_PER_THREAD; i++) {
+      prioAdj[i] = 2;
+      if (localId + i < minfo.size) {
+        renderPris[localId + i] = dis[i] << 16 | int(~(localId + i) & 0xffffu);
+      }
+    }
+    memoryBarrierShared();
+    barrier();
+  } else {
+    memoryBarrierShared();
+    barrier();
+
+    // the totals for the averages, a run of this thread's facing faces of one priority at once
+    {
+      int runP = -1, runN = 0, runD = 0, runLow = 6000;
+      for (int i = 0; i < FACES_PER_THREAD; i++) {
+        if (localId + i < minfo.size && vis[i]) {
+          if (prio[i] != runP) {
+            add_priority_run(runP, runN, runD, runLow);
+            runP = prio[i];
+            runN = 0;
+            runD = 0;
+            runLow = 6000;
+          }
+          runN++;
+          runD += dis[i];
+          runLow = min(runLow, dis[i]);
+        }
+      }
+      add_priority_run(runP, runN, runD, runLow);
+    }
+
+    memoryBarrierShared();
+    barrier();
+
+    // each face's adjusted priority, and its place in that stretch: a run of this thread's faces of one adjusted
+    // priority takes its places at once (any places do: the stretch is sorted next)
+    int idx[FACES_PER_THREAD];
+    for (int i = 0; i < FACES_PER_THREAD; i++) {
+      prioAdj[i] = adjusted_priority(localId + i, minfo, prio[i], dis[i]);
+    }
+    for (int i = 0; i < FACES_PER_THREAD; i++) {
+      if (localId + i < minfo.size) {
+        if (i > 0 && prioAdj[i] == prioAdj[i - 1]) {
+          idx[i] = idx[i - 1] + 1;
+        } else {
+          int n = 1;
+          for (int j = i + 1; j < FACES_PER_THREAD; j++) {
+            if (localId + j < minfo.size && prioAdj[j] == prioAdj[i] && n == j - i) {
+              n++;
+            }
+          }
+          idx[i] = atomicAdd(totalMappedNum[prioAdj[i]], n);
+        }
+      } else {
+        idx[i] = 0;
+      }
+    }
+
+    memoryBarrierShared();
+    barrier();
+
+    for (int i = 0; i < FACES_PER_THREAD; i++) {
+      insert_face(localId + i, minfo, prioAdj[i], dis[i], idx[i]);
+    }
+
+    memoryBarrierShared();
+    barrier();
   }
-
-  memoryBarrierShared();
-  barrier();
-
-  for (int i = 0; i < FACES_PER_THREAD; i++) {
-    insert_face(localId + i, minfo, prioAdj[i], dis[i], idx[i]);
-  }
-
-  memoryBarrierShared();
-  barrier();
 
 #ifndef COUNTING_SORT
   sort_priorities();

@@ -3563,6 +3563,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				if (!zoneEntrySafe(f.keys[k], f.ksrc[k]))
 				{
 					zoneAborted = true;
+					if (Build.DEVELOPER)
+					{
+						final int ref = f.kref[k];
+						zoneStopper = String.format("kind %d, %s, record %s", f.kkind[k],
+							f.keys[k] == null ? "nothing" : f.keys[k].getClass().getSimpleName(),
+							ref == -1 ? "none" : String.valueOf(ref >= 0 ? f.tileRec[ref] : f.oRec[-ref - 2]));
+					}
 					return;
 				}
 				continue;
@@ -3621,6 +3628,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int zoneFast;
 	// the thread's last frame: the walk's second half and the draw list (ns), draws from records
 	private long zoneWalkNs, zoneListNs;
+	// the developer log of the frames the thread had to stop in, and the first entry it stopped at
+	private volatile String zoneStopper;
+	private String zoneStopFirst;
+	private int zoneStops, zoneThreadFrames;
+	private long lastZoneStopLog;
 
 	private void zoneWork(Scene scene, CpuOrder.Visible visible, FastOrder.Frustum fr, boolean lean, boolean prepared, boolean safe)
 	{
@@ -3675,6 +3687,21 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			resetOutput();
 			drawLoop(zoneDrawScene, true, true, false);
 			redone = true;
+			zoneStops++;
+			if (zoneStopFirst == null)
+			{
+				zoneStopFirst = zoneStopper;
+			}
+		}
+		zoneThreadFrames++;
+		if (Build.DEVELOPER && timing && System.nanoTime() - lastZoneStopLog > 5_000_000_000L)
+		{
+			lastZoneStopLog = System.nanoTime();
+			log.info("Bitcrush zone mode's own thread: done again on the client's thread in {} of {} frames{}", zoneStops,
+				zoneThreadFrames, zoneStopFirst != null ? " (the first entry it couldn't draw: " + zoneStopFirst
+					+ "; kinds: 0 ground, 1-2 wall, 3-4 decoration, 5 ground decoration, 6 item, 7 object)" : "");
+			zoneStops = zoneThreadFrames = 0;
+			zoneStopFirst = null;
 		}
 		zoneDrawScene = null;
 		final long u0 = timing ? System.nanoTime() : 0;
@@ -3882,7 +3909,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if (key instanceof net.runelite.api.DynamicObject && src instanceof TileObject && kind != FastOrder.K_ITEM)
 		{
-			return preparePushed(scene, key, src, kind, params, out, at, keep, (net.runelite.api.DynamicObject) key, (TileObject) src);
+			final net.runelite.api.DynamicObject d = (net.runelite.api.DynamicObject) key;
+			final Model still = d.getModelZbuf();
+			if (still == null || still.getSceneId() == sceneId)
+			{
+				return false;
+			}
+			return preparePushed(scene, key, src, kind, params, out, at, keep, d, still, (TileObject) src);
 		}
 		if (!(key instanceof Model))
 		{
@@ -3896,7 +3929,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if (offsetModel.getSceneId() != sceneId)
 		{
-			return false;
+			// a model not in the scene's buffer (its object put there after the scene loaded): copied once, as
+			// drawRenderable's temporary branch copies it every frame (11/19/2026: zone mode's own thread stopped at them)
+			return preparePushed(scene, key, src, kind, params, out, at, keep, model, model,
+				src instanceof TileObject ? (TileObject) src : null);
 		}
 		final boolean shown = !(src instanceof TileObject) || renderCallbackManager.drawObject(scene, (TileObject) src);
 		final long hash = FastOrder.draw(key, src, kind, params);
@@ -3927,24 +3963,22 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		return true;
 	}
 
-	// an at-rest animated object's record: zoneEntry's still path (drawRenderable's temporary branch with the object's
-	// getModelZbuf), its model copied now
+	// a record whose model is copied now: drawRenderable's temporary branch for d drawn with the model still (an at-rest
+	// animated object's getModelZbuf, or a model not in the scene's buffer, d itself)
 	private boolean preparePushed(Scene scene, Object key, Object srcObject, byte kind, int[] params, int[] out, int at, boolean keep,
-		net.runelite.api.DynamicObject d, TileObject src)
+		Renderable d, Model still, TileObject src)
 	{
-		final Model still = d.getModelZbuf();
-		if (still == null || still.getSceneId() == sceneId)
-		{
-			return false;
-		}
-		final boolean shown = renderCallbackManager.drawObject(scene, src);
+		final boolean shown = src == null || renderCallbackManager.drawObject(scene, src);
 		final long hash = FastOrder.draw(key, srcObject, kind, params);
 		if (params[0] < 0)
 		{
 			return false;
 		}
 		final int x = params[1], y = params[2], z = params[3];
-		d.setModelHeight(still.getModelHeight());
+		if (still != d)
+		{
+			d.setModelHeight(still.getModelHeight());
+		}
 		still.calculateBoundsCylinder();
 		final boolean see = still.getFaceTransparencies() != null || still.getTransparency() != 0;
 		final boolean painter = painterModels && d.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;

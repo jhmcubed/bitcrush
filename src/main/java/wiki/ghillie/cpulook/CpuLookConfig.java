@@ -303,6 +303,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "zoneCheck",
+		name = "Zone mode: check the walk",
+		description = "A check: every 30th frame in zone mode, the order worked out from the scene as kept (read when it loads, its zones read again when the client says they changed) is compared entry for entry with the order from the scene read afresh; Log frame timings isn't needed, the result is logged every five seconds. Costs a few milliseconds every 30th frame.",
+		position = 47,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean zoneCheck()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

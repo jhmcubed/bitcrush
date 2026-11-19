@@ -83,8 +83,11 @@ final class FastOrder
 	private final int[] fl = new int[ALL];
 	private static final int STRIDE = 32;
 	private final int[] st = new int[ALL * STRIDE];
-	private static final int F = 0, MASK = 1, EDGES = 2, EA = 3, EB = 4, LATE = 5, NOBJ = 6, HAS = 7, WA = 8, WB = 9, WX = 10,
+	private static final int F = 0, MASK = 1, NOBJ = 6, HAS = 7, WA = 8, WB = 9, WX = 10,
 		WY = 11, DX = 12, DY = 13, GX = 14, GY = 15, IH = 16, IX = 17, IY = 18, OBJ = 20;
+	// each slot's state for this frame's walls, apart from st so a frame clears it cheaply (zone mode keeps st from
+	// frame to frame): the held edges (bits 0-3), edge A (4-7), edge B (8-11), the later walls (12-19)
+	private final int[] pf = new int[ALL];
 	// HAS: what the tile has
 	private static final int H_WALL = 1, H_DECOR = 2, H_ITEMS = 4, H_BRIDGE = 8, H_GROUND = 16, H_GOBJ = 32;
 	// the tile's renderables (and its bridge), read in the setup
@@ -122,7 +125,7 @@ final class FastOrder
 	// tiles under them as the CPU's own walk finds them; none in the old mode, where the tiles list them themselves
 	private GameObject[] temps = new GameObject[0];
 	private int nTemps;
-	private final int[] tempFirst = new int[ALL];
+	private final int[] tempFirst = new int[ALL], tempLast = new int[ALL];
 	private int[] tempNext = new int[256], tempOf = new int[256], touched = new int[256];
 	private int nEntries, nTouched;
 
@@ -173,9 +176,18 @@ final class FastOrder
 						}
 						touched[nTouched++] = i;
 					}
+					// (appended: a tile lists its temporary objects in the order the client adds them, as CpuOrder does)
 					tempOf[nEntries] = t;
-					tempNext[nEntries] = tempFirst[i];
-					tempFirst[i] = nEntries++;
+					tempNext[nEntries] = -1;
+					if (tempFirst[i] < 0)
+					{
+						tempFirst[i] = nEntries;
+					}
+					else
+					{
+						tempNext[tempLast[i]] = nEntries;
+					}
+					tempLast[i] = nEntries++;
 				}
 			}
 		}
@@ -193,7 +205,11 @@ final class FastOrder
 	// a game object on tile slot i (p, x, y): onto the tile's list; false when the slot is full
 	private boolean put(GameObject g, int p, int x, int y, int i)
 	{
-		int o = find(g, p, x, y, i);
+		return putObject(find(g, p, x, y, i), i, x, y);
+	}
+
+	private boolean putObject(int o, int i, int x, int y)
+	{
 		int k = st[i * STRIDE + NOBJ];
 		for (int j = 0; j < k; j++)
 		{
@@ -218,6 +234,7 @@ final class FastOrder
 	// draw in full is worked out from them (draw), as the client's tile draw hands it over (stage B, B1)
 	Object[] ksrc = new Object[8192];
 	byte[] kkind = new byte[8192];
+	int[] kref = new int[8192];
 	int n;
 
 	static final byte K_GROUND = 0, K_WALL1 = 1, K_WALL2 = 2, K_DECOR1 = 3, K_DECOR2 = 4, K_GOBJ = 5, K_ITEM = 6, K_OBJ = 7;
@@ -283,34 +300,14 @@ final class FastOrder
 	void build(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible)
 	{
 		final long t0 = System.nanoTime();
-		setupNs = readNs = sweepNs = 0;
-		stamp++;
-		n = 0;
-		nObj = 0;
-		strays.clear();
-		qHead = qSize = 0;
-		overflowed = false;
-		Tile[][][] tiles = scene.getExtendedTiles();
+		Tile[][][] tiles = begin(scene, cameraX, cameraZ, drawDistance);
 		if (tiles == null)
 		{
 			return;
 		}
-		camX = cameraX;
-		camZ = cameraZ;
-		cx = Math.max(0, Math.min(SIZE - 1, (cameraX >> 7) + OFFSET));
-		cy = Math.max(0, Math.min(SIZE - 1, (cameraZ >> 7) + OFFSET));
-		int r = Math.max(1, drawDistance);
-		xmin = Math.max(0, cx - r);
-		xmax = Math.min(SIZE, cx + r);
-		ymin = Math.max(0, cy - r);
-		ymax = Math.min(SIZE, cy + r);
-		int minLevel = Math.max(0, scene.getMinLevel());
-		pending = 0;
-		steps = 0;
-		gaveUp = false;
-		maxSteps = 64L * 4 * (xmax - xmin) * (ymax - ymin) + 100000;
-
-		java.util.Arrays.fill(planeUsed, false);
+		// this way reads the frame's square into the slots, over whatever zone mode kept there
+		cached = null;
+		nStatic = nObj = 0;
 		placeTemps();
 		try
 		{
@@ -324,11 +321,101 @@ final class FastOrder
 		{
 			clearTemps();
 		}
-		final long tRead = System.nanoTime();
-		readNs = tRead - t0;
+		readNs = System.nanoTime() - t0;
+		view(scene, visible);
+		setupNs = System.nanoTime() - t0;
+		final long t1 = System.nanoTime();
+		sweep(minLevel, radius);
+		sweepNs = System.nanoTime() - t1;
+	}
 
-		// which tiles are in view this frame: the part of the setup stage B would still pay every frame (the reading
-		// above it would do once when the scene loads)
+	/**
+	 * Zone mode's frame (stage B, 11/19/2026): the same walk, from the scene as read when it loaded, with the zones the
+	 * client has said changed since (invalidateZone) read again; only this frame's temporary objects are added to the
+	 * tiles under them, and taken off again after. readNs is then that work: the zones read again and the temporary
+	 * objects put on.
+	 */
+	void buildCached(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible)
+	{
+		final long t0 = System.nanoTime();
+		Tile[][][] tiles = begin(scene, cameraX, cameraZ, drawDistance);
+		if (tiles == null)
+		{
+			return;
+		}
+		sync(scene, tiles);
+		if (overflowTiles > 0)
+		{
+			overflowed = true;
+			return;
+		}
+		placeTemps();
+		boolean fits;
+		try
+		{
+			fits = putTemps();
+		}
+		finally
+		{
+			clearTemps();
+		}
+		if (!fits)
+		{
+			takeTempsOff();
+			overflowed = true;
+			return;
+		}
+		readNs = System.nanoTime() - t0;
+		view(scene, visible);
+		setupNs = System.nanoTime() - t0;
+		final long t1 = System.nanoTime();
+		sweep(minLevel, radius);
+		takeTempsOff();
+		sweepNs = System.nanoTime() - t1;
+	}
+
+	private int minLevel, radius;
+
+	// the frame's start: the camera, its square, the counts; the scene's tiles, or null
+	private Tile[][][] begin(Scene scene, int cameraX, int cameraZ, int drawDistance)
+	{
+		setupNs = readNs = sweepNs = 0;
+		stamp++;
+		n = 0;
+		if (nObj > nStatic)
+		{
+			nObj = nStatic;
+		}
+		strays.clear();
+		qHead = qSize = 0;
+		overflowed = false;
+		Tile[][][] tiles = scene.getExtendedTiles();
+		if (tiles == null)
+		{
+			return null;
+		}
+		camX = cameraX;
+		camZ = cameraZ;
+		cx = Math.max(0, Math.min(SIZE - 1, (cameraX >> 7) + OFFSET));
+		cy = Math.max(0, Math.min(SIZE - 1, (cameraZ >> 7) + OFFSET));
+		radius = Math.max(1, drawDistance);
+		xmin = Math.max(0, cx - radius);
+		xmax = Math.min(SIZE, cx + radius);
+		ymin = Math.max(0, cy - radius);
+		ymax = Math.min(SIZE, cy + radius);
+		minLevel = Math.max(0, scene.getMinLevel());
+		pending = 0;
+		steps = 0;
+		gaveUp = false;
+		maxSteps = 64L * 4 * (xmax - xmin) * (ymax - ymin) + 100000;
+		java.util.Arrays.fill(planeUsed, false);
+		return tiles;
+	}
+
+	// which tiles are in view this frame, and every tile's state for the frame cleared (the part of the setup zone mode
+	// still pays every frame)
+	private void view(Scene scene, CpuOrder.Visible visible)
+	{
 		for (int p = 0; p < 4; p++)
 		{
 			for (int x = xmin; x < xmax; x++)
@@ -336,8 +423,15 @@ final class FastOrder
 				int i = (p * SIZE + x) * SIZE + ymin;
 				for (int y = ymin; y < ymax; y++, i++)
 				{
-					if (fl[i] == 0 || p < minLevel || !visible.test(p, x, y))
+					if (tileAt[i] == null)
 					{
+						fl[i] = 0;
+						continue;
+					}
+					pf[i] = 0;
+					if (p < minLevel || !visible.test(p, x, y))
+					{
+						fl[i] = EXISTS;
 						continue;
 					}
 					fl[i] = EXISTS | PRIMARY | SECONDARY | (st[i * STRIDE + NOBJ] > 0 ? LEFT : 0);
@@ -346,11 +440,318 @@ final class FastOrder
 				}
 			}
 		}
+	}
 
-		final long t1 = System.nanoTime();
-		setupNs = t1 - t0;
-		sweep(minLevel, r);
-		sweepNs = System.nanoTime() - t1;
+	// ---- zone mode: the scene kept from frame to frame ----
+
+	private Scene cached;
+	// the objects read from the scene (the first nStatic of the objects' arrays; this frame's temporary ones after them)
+	private int nStatic;
+	private final IdentityHashMap<GameObject, Integer> objIndex = new IdentityHashMap<>();
+	// tiles holding more objects than a slot (CpuOrder then does every frame, as in the old mode)
+	private final boolean[] overflow = new boolean[ALL];
+	private int overflowTiles;
+	private static final int ZONES = (SIZE + 7) >> 3;
+	private final boolean[] dirty = new boolean[ZONES * ZONES];
+	private int[] dirtyList = new int[64];
+	private int nDirty;
+	private boolean dirtyAll;
+	// a zone's reading: the slots to read again, marked by a stamp
+	private final int[] rereadMark = new int[ALL];
+	private int rereadStamp;
+	private int[] rereadList = new int[1024];
+	private int nReread;
+	// the temporary objects' tiles: their objects' count and mask before them
+	private int[] tempSlot = new int[256], tempNobj = new int[256], tempMask = new int[256];
+	private int nTempSlots;
+	private final IdentityHashMap<GameObject, Integer> tempIndex = new IdentityHashMap<>();
+	// zone reading this frame: the zones and the slots read (for the timings and the developer log)
+	int zonesRead, slotsRead;
+	boolean fullRead;
+
+	/**
+	 * Prepared draws (zone mode, kept by the plugin): for each tile slot and role (ROLES a slot), and for each object read
+	 * from the scene, the index of the plugin's record for its draw, -1 for none yet (-2: not one to prepare). Cleared
+	 * where the scene is read again. records counts the times every one was cleared (a new scene).
+	 */
+	static final int ROLES = 9;
+	final int[] tileRec = new int[ALL * ROLES];
+	int[] oRec = new int[4096];
+	int records;
+
+	{
+		Arrays.fill(tileRec, -1);
+	}
+
+	// every prepared draw dropped (the plugin's settings for them changed)
+	void dropRecords()
+	{
+		Arrays.fill(tileRec, -1);
+		Arrays.fill(oRec, 0, nObj, -1);
+		records++;
+	}
+
+	// the client says zone (zx, zz) of the scene changed (invalidateZone; extended tiles >> 3)
+	synchronized void invalidate(int zx, int zz)
+	{
+		if (zx < 0 || zz < 0 || zx >= ZONES || zz >= ZONES)
+		{
+			return;
+		}
+		int z = zx * ZONES + zz;
+		if (dirty[z])
+		{
+			return;
+		}
+		dirty[z] = true;
+		if (nDirty == dirtyList.length)
+		{
+			dirtyList = Arrays.copyOf(dirtyList, nDirty * 2);
+		}
+		dirtyList[nDirty++] = z;
+	}
+
+	// the whole scene to be read again before the next frame (a new scene, or anything zone mode can't follow)
+	synchronized void invalidateAll()
+	{
+		dirtyAll = true;
+	}
+
+	private void sync(Scene scene, Tile[][][] tiles)
+	{
+		boolean all;
+		int[] zones;
+		int nz;
+		synchronized (this)
+		{
+			all = dirtyAll || cached != scene;
+			dirtyAll = false;
+			zones = nDirty == 0 ? null : Arrays.copyOf(dirtyList, nDirty);
+			nz = nDirty;
+			for (int k = 0; k < nDirty; k++)
+			{
+				dirty[dirtyList[k]] = false;
+			}
+			nDirty = 0;
+		}
+		zonesRead = slotsRead = 0;
+		fullRead = all;
+		if (all)
+		{
+			readScene(scene, tiles);
+			return;
+		}
+		for (int k = 0; k < nz; k++)
+		{
+			readZone(tiles, zones[k] / ZONES, zones[k] % ZONES);
+		}
+	}
+
+	// the whole scene into the slots
+	private void readScene(Scene scene, Tile[][][] tiles)
+	{
+		cached = scene;
+		nObj = nStatic = 0;
+		objIndex.clear();
+		Arrays.fill(overflow, false);
+		overflowTiles = 0;
+		Arrays.fill(tileRec, -1);
+		records++;
+		for (int p = 0; p < 4; p++)
+		{
+			for (int x = 0; x < SIZE; x++)
+			{
+				for (int y = 0; y < SIZE; y++)
+				{
+					readSlot(tiles, p, x, y);
+				}
+			}
+		}
+		nStatic = nObj;
+		slotsRead = ALL;
+	}
+
+	/**
+	 * Zone (zx, zz) read again. The client reports a big object's change only in the zone of its first tile (ei.an and
+	 * ei.bu, read 11/19/2026), so the tiles of every object reaching out of the zone, before and after, are read again
+	 * with it: an object taken away leaves none of its tiles, and one put there is on all of them.
+	 */
+	private void readZone(Tile[][][] tiles, int zx, int zz)
+	{
+		zonesRead++;
+		rereadStamp++;
+		nReread = 0;
+		final int x0 = zx << 3, y0 = zz << 3, x1 = Math.min(SIZE, x0 + 8), y1 = Math.min(SIZE, y0 + 8);
+		for (int p = 0; p < 4; p++)
+		{
+			for (int x = x0; x < x1; x++)
+			{
+				for (int y = y0; y < y1; y++)
+				{
+					int i = (p * SIZE + x) * SIZE + y;
+					mark(i);
+					footprints(i, p);
+				}
+			}
+		}
+		// (the list grows as the slots read find more objects reaching out: read until none are left)
+		for (int k = 0; k < nReread; k++)
+		{
+			int i = rereadList[k];
+			int p = i / PLANE, rem = i - p * PLANE, x = rem / SIZE, y = rem - x * SIZE;
+			readSlot(tiles, p, x, y);
+			footprints(i, p);
+		}
+		nStatic = nObj;
+		slotsRead += nReread;
+	}
+
+	private void mark(int i)
+	{
+		if (rereadMark[i] == rereadStamp)
+		{
+			return;
+		}
+		rereadMark[i] = rereadStamp;
+		if (nReread == rereadList.length)
+		{
+			rereadList = Arrays.copyOf(rereadList, nReread * 2);
+		}
+		rereadList[nReread++] = i;
+	}
+
+	// every tile of each object slot i lists (on plane p), to be read again
+	private void footprints(int i, int p)
+	{
+		if (tileAt[i] == null)
+		{
+			return;
+		}
+		for (int k = 0, nk = st[i * STRIDE + NOBJ]; k < nk; k++)
+		{
+			int o = st[i * STRIDE + OBJ + k];
+			for (int fx = Math.max(0, oSx[o]); fx <= Math.min(SIZE - 1, oEx[o]); fx++)
+			{
+				for (int fy = Math.max(0, oSy[o]); fy <= Math.min(SIZE - 1, oEy[o]); fy++)
+				{
+					mark((p * SIZE + fx) * SIZE + fy);
+				}
+			}
+		}
+	}
+
+	// one tile read from the scene into its slot: its objects (each made once for the scene), and what the sweep needs
+	private void readSlot(Tile[][][] tiles, int p, int x, int y)
+	{
+		final int i = (p * SIZE + x) * SIZE + y;
+		Tile[][] plane = p < tiles.length ? tiles[p] : null;
+		Tile[] column = plane != null && x < plane.length ? plane[x] : null;
+		Tile tile = column != null && y < column.length ? column[y] : null;
+		tileAt[i] = tile;
+		Arrays.fill(tileRec, i * ROLES, i * ROLES + ROLES, -1);
+		if (overflow[i])
+		{
+			overflow[i] = false;
+			overflowTiles--;
+		}
+		final int b = i * STRIDE;
+		st[b + MASK] = st[b + NOBJ] = 0;
+		if (tile == null)
+		{
+			fl[i] = 0;
+			return;
+		}
+		fl[i] = EXISTS;
+		GameObject[] gos = tile.getGameObjects();
+		if (gos != null)
+		{
+			for (GameObject g : gos)
+			{
+				if (g == null)
+				{
+					continue;
+				}
+				Integer known = objIndex.get(g);
+				int o;
+				if (known != null)
+				{
+					o = known;
+				}
+				else
+				{
+					o = make(g, g.getSceneMinLocation(), g.getSceneMaxLocation(), x, y);
+					objIndex.put(g, o);
+				}
+				if (!putObject(o, i, x, y) && !overflow[i])
+				{
+					overflow[i] = true;
+					overflowTiles++;
+				}
+			}
+		}
+		read(tile, i, b);
+	}
+
+	// this frame's temporary objects onto the tiles under them (each made once, as CpuOrder finds them by identity);
+	// false when a tile can't hold them
+	private boolean putTemps()
+	{
+		nTempSlots = 0;
+		tempIndex.clear();
+		for (int k = 0; k < nTouched; k++)
+		{
+			final int i = touched[k];
+			if (tileAt[i] == null)
+			{
+				continue;
+			}
+			if (nTempSlots == tempSlot.length)
+			{
+				tempSlot = Arrays.copyOf(tempSlot, nTempSlots * 2);
+				tempNobj = Arrays.copyOf(tempNobj, nTempSlots * 2);
+				tempMask = Arrays.copyOf(tempMask, nTempSlots * 2);
+			}
+			tempSlot[nTempSlots] = i;
+			tempNobj[nTempSlots] = st[i * STRIDE + NOBJ];
+			tempMask[nTempSlots] = st[i * STRIDE + MASK];
+			nTempSlots++;
+			final int p = i / PLANE, rem = i - p * PLANE, x = rem / SIZE, y = rem - x * SIZE;
+			for (int e = tempFirst[i]; e >= 0; e = tempNext[e])
+			{
+				GameObject g = temps[tempOf[e]];
+				Integer known = tempIndex.get(g);
+				int o;
+				if (known != null)
+				{
+					o = known;
+				}
+				else
+				{
+					// (in CpuOrder's setup order, plane, x, y, the first tile of its own reached; its place then)
+					o = make(g, g.getSceneMinLocation(), g.getSceneMaxLocation(), x, y);
+					tempIndex.put(g, o);
+				}
+				if (!putObject(o, i, x, y))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	// the temporary objects taken off their tiles again (the tiles as read from the scene)
+	private void takeTempsOff()
+	{
+		for (int k = 0; k < nTempSlots; k++)
+		{
+			final int i = tempSlot[k];
+			st[i * STRIDE + NOBJ] = tempNobj[k];
+			st[i * STRIDE + MASK] = tempMask[k];
+		}
+		nTempSlots = 0;
+		tempIndex.clear();
+		nObj = nStatic;
 	}
 
 	// every tile in the square into its slot: its objects (and the temporary ones on it), and what the sweep needs
@@ -373,7 +774,7 @@ final class FastOrder
 						continue;
 					}
 					final int b = i * STRIDE;
-					st[b + MASK] = st[b + EDGES] = st[b + EA] = st[b + EB] = st[b + LATE] = st[b + NOBJ] = 0;
+					st[b + MASK] = st[b + NOBJ] = 0;
 					fl[i] = EXISTS;
 					GameObject[] gos = tile.getGameObjects();
 					if (gos != null)
@@ -598,6 +999,7 @@ final class FastOrder
 			oDrawn = Arrays.copyOf(oDrawn, len);
 			oDist = Arrays.copyOf(oDist, len);
 			oR = Arrays.copyOf(oR, len);
+			oRec = Arrays.copyOf(oRec, len);
 		}
 		int o = nObj++;
 		oG[o] = g;
@@ -609,6 +1011,7 @@ final class FastOrder
 		oY[o] = g.getY();
 		oR[o] = g.getRenderable();
 		oDrawn[o] = 0;
+		oRec[o] = -1;
 		return o;
 	}
 
@@ -655,7 +1058,9 @@ final class FastOrder
 		return (x > oSx[o] ? 1 : 0) + (x < oEx[o] ? 4 : 0) + (y > oSy[o] ? 8 : 0) + (y < oEy[o] ? 2 : 0);
 	}
 
-	private void emit(Object key, int x, int z, Object src, byte kind)
+	// ref: where the entry's prepared draw is kept (zone mode): a tile's slot and role (t * ROLES + role, 0 or more), a
+	// static object (-(o + 2)), or none (-1)
+	private void emit(Object key, int x, int z, Object src, byte kind, int ref)
 	{
 		if (key == null)
 		{
@@ -668,12 +1073,14 @@ final class FastOrder
 			kz = Arrays.copyOf(kz, n * 2);
 			ksrc = Arrays.copyOf(ksrc, n * 2);
 			kkind = Arrays.copyOf(kkind, n * 2);
+			kref = Arrays.copyOf(kref, n * 2);
 		}
 		keys[n] = key;
 		kx[n] = x;
 		kz[n] = z;
 		ksrc[n] = src;
 		kkind[n] = kind;
+		kref[n] = ref;
 		n++;
 	}
 
@@ -733,13 +1140,14 @@ final class FastOrder
 				first(t, p, x, y);
 			}
 
-			if (st[t * STRIDE + EDGES] != 0)
+			if ((pf[t] & 15) != 0)
 			{
 				boolean ok = true;
+				final int edges = pf[t] & 15, ea = pf[t] >> 4 & 15;
 				for (int k = 0, nk = st[t * STRIDE + NOBJ]; k < nk; k++)
 				{
 					int o = st[t * STRIDE + OBJ + k];
-					if (oDrawn[o] != stamp && (mask(o, x, y) & st[t * STRIDE + EDGES]) == st[t * STRIDE + EA])
+					if (oDrawn[o] != stamp && (mask(o, x, y) & edges) == ea)
 					{
 						ok = false;
 						break;
@@ -750,9 +1158,9 @@ final class FastOrder
 					final int b = t * STRIDE;
 					if ((st[b + HAS] & H_WALL) != 0)
 					{
-						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1);
+						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1, t * ROLES + R_W1);
 					}
-					st[b + EDGES] = 0;
+					pf[t] &= ~15;
 				}
 			}
 
@@ -765,7 +1173,7 @@ final class FastOrder
 				}
 			}
 
-			if ((fl[t] & SECONDARY) == 0 || st[t * STRIDE + EDGES] != 0)
+			if ((fl[t] & SECONDARY) == 0 || (pf[t] & 15) != 0)
 			{
 				continue;
 			}
@@ -826,13 +1234,13 @@ final class FastOrder
 		Object paint = tile.getSceneTilePaint();
 		if (paint != null)
 		{
-			emit(paint, lx, lz, tile, K_GROUND);
+			emit(paint, lx, lz, tile, K_GROUND, -1);
 			return true;
 		}
 		Object model = tile.getSceneTileModel();
 		if (model != null)
 		{
-			emit(model, lx, lz, tile, K_GROUND);
+			emit(model, lx, lz, tile, K_GROUND, -1);
 			return true;
 		}
 		return false;
@@ -849,7 +1257,7 @@ final class FastOrder
 			WallObject bw = bridge.getWallObject();
 			if (bw != null)
 			{
-				emit(bw.getRenderable1(), bw.getX(), bw.getY(), bw, K_WALL1);
+				emit(bw.getRenderable1(), bw.getX(), bw.getY(), bw, K_WALL1, -1);
 			}
 			GameObject[] bos = bridge.getGameObjects();
 			if (bos != null)
@@ -858,7 +1266,7 @@ final class FastOrder
 				{
 					if (g != null)
 					{
-						emit(g.getRenderable(), g.getX(), g.getY(), g, K_OBJ);
+						emit(g.getRenderable(), g.getX(), g.getY(), g, K_OBJ, -1);
 					}
 				}
 			}
@@ -866,7 +1274,7 @@ final class FastOrder
 		final boolean hasGround = (has & H_GROUND) != 0;
 		if (hasGround)
 		{
-			emit(refs[r + R_GROUND], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, refs[r + R_TILE], K_GROUND);
+			emit(refs[r + R_GROUND], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, refs[r + R_TILE], K_GROUND, t * ROLES + R_GROUND);
 		}
 
 		final boolean w = (has & H_WALL) != 0, d = (has & H_DECOR) != 0;
@@ -875,7 +1283,8 @@ final class FastOrder
 		{
 			dir = (x == cx ? 1 : cx < x ? 2 : 0) + (y == cy ? 3 : cy > y ? 6 : 0);
 			firstMask = FIRST[dir];
-			st[b + LATE] = LATER[dir];
+			// (the frame's wall state starts at 0 for every tile: the view's setup clears it)
+			pf[t] = LATER[dir] << 12;
 		}
 		if (w)
 		{
@@ -884,33 +1293,27 @@ final class FastOrder
 			{
 				int[] table = a == 16 ? EDGE16 : a == 32 ? EDGE32 : a == 64 ? EDGE64 : EDGE128;
 				int e = a == 16 ? 3 : a == 32 ? 6 : a == 64 ? 12 : 9;
-				st[b + EDGES] = e;
-				st[b + EA] = table[dir];
-				st[b + EB] = e - table[dir];
-			}
-			else
-			{
-				st[b + EDGES] = 0;
+				pf[t] |= e | table[dir] << 4 | (e - table[dir]) << 8;
 			}
 			if ((a & firstMask) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, t * ROLES + R_W1);
 			}
 			if ((st[b + WB] & firstMask) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, t * ROLES + R_W2);
 			}
 		}
 		if (d)
 		{
-			emit(refs[r + R_D1], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR1);
-			emit(refs[r + R_D2], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR2);
+			emit(refs[r + R_D1], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR1, t * ROLES + R_D1);
+			emit(refs[r + R_D2], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR2, t * ROLES + R_D2);
 		}
 		if (hasGround)
 		{
 			if ((has & H_GOBJ) != 0)
 			{
-				emit(refs[r + R_G], st[b + GX], st[b + GY], refs[r + R_GOBJ], K_GOBJ);
+				emit(refs[r + R_G], st[b + GX], st[b + GY], refs[r + R_GOBJ], K_GOBJ, t * ROLES + R_G);
 			}
 			if ((has & H_ITEMS) != 0 && st[b + IH] == 0)
 			{
@@ -943,9 +1346,9 @@ final class FastOrder
 	private void items(int t)
 	{
 		final int b = t * STRIDE, r = t * RSTRIDE;
-		emit(refs[r + R_IM], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
-		emit(refs[r + R_IT], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
-		emit(refs[r + R_IB], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
+		emit(refs[r + R_IM], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IM);
+		emit(refs[r + R_IT], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IT);
+		emit(refs[r + R_IB], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM, t * ROLES + R_IB);
 	}
 
 	private void objects(int t, int p, int x, int y)
@@ -969,7 +1372,7 @@ final class FastOrder
 					{
 						continue;
 					}
-					if ((fl[f] & PRIMARY) != 0 || st[f * STRIDE + EDGES] != 0 && (mask(o, fx, fy) & st[f * STRIDE + EDGES]) == st[t * STRIDE + EB])
+					if ((fl[f] & PRIMARY) != 0 || (pf[f] & 15) != 0 && (mask(o, fx, fy) & pf[f] & 15) == (pf[t] >> 8 & 15))
 					{
 						blocked = true;
 						break;
@@ -1016,7 +1419,7 @@ final class FastOrder
 				break;
 			}
 			oDrawn[best] = stamp;
-			emit(oR[best], oX[best], oY[best], oG[best], K_OBJ);
+			emit(oR[best], oX[best], oY[best], oG[best], K_OBJ, best < nStatic ? -(best + 2) : -1);
 			for (int fx = oSx[best]; fx <= oEx[best]; fx++)
 			{
 				for (int fy = oSy[best]; fy <= oEy[best]; fy++)
@@ -1026,7 +1429,7 @@ final class FastOrder
 					{
 						continue;
 					}
-					if (st[f * STRIDE + EDGES] != 0)
+					if ((pf[f] & 15) != 0)
 					{
 						add(f);
 					}
@@ -1046,16 +1449,16 @@ final class FastOrder
 		{
 			items(t);
 		}
-		final int late = st[b + LATE];
+		final int late = pf[t] >> 12 & 255;
 		if (late != 0 && (has & H_WALL) != 0)
 		{
 			if ((st[b + WB] & late) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2, t * ROLES + R_W2);
 			}
 			if ((st[b + WA] & late) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1, t * ROLES + R_W1);
 			}
 		}
 	}

@@ -461,7 +461,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private volatile boolean zoneIdle;
 	// drawDynamic comes from the client's render threads, drawTemp from its own thread beside them: their copying one
 	// at a time
-	private final Object zoneLock = new Object();
 	private float frameYawSin, frameYawCos, framePitchSin, framePitchCos;
 	private int frameCamX, frameCamY, frameCamZ;
 	private int zoneLevel, zoneMaxLevel;
@@ -639,6 +638,20 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				// the client's own zone-mode work (its picking) over render threads, as RuneLite's GPU plugin has it
 				// (the common pool's parallelism: the processor's cores less one)
 				zoneThreads = Math.max(0, Math.min(java.util.concurrent.ForkJoinPool.getCommonPoolParallelism(), config.zoneThreads()));
+				if (zoneMode)
+				{
+					// a stage for the client's own thread, one for each render thread, and one spare
+					Stage[] st = new Stage[zoneThreads + 2];
+					for (int k = 0; k < st.length; k++)
+					{
+						st[k] = new Stage();
+					}
+					stages = st;
+				}
+				else
+				{
+					stages = null;
+				}
 				client.setGpuFlags(gpuFlags());
 				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 
@@ -1763,6 +1776,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		this.cameraPitchUnits = pitch;
 		zoneFrame = zoneMode;
 		zoneIdle = zoneMode && Build.DEVELOPER && config.zoneIdle();
+		zoneCheck = zoneMode && Build.DEVELOPER && config.zoneCheck();
 		frameYawSin = (float) Math.sin(cameraYaw);
 		frameYawCos = (float) Math.cos(cameraYaw);
 		framePitchSin = (float) Math.sin(cameraPitch);
@@ -1774,6 +1788,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		zoneTemp.clear();
 		temps = 0;
 		ups = 0;
+		stagedV = stagedUv = 0;
+		if (zoneMode && stages != null)
+		{
+			for (Stage stage : stages)
+			{
+				stage.clear();
+			}
+			// (read here, before the render threads cull with them)
+			readClip();
+		}
 		this.cameraY = camY;
 		this.cameraZ = camZ;
 		draws = 0;
@@ -1911,9 +1935,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		IntBuffer modelBufferMid = this.modelBufferMid.getBuffer();
 		IntBuffer modelBufferUnordered = this.modelBufferUnordered.getBuffer();
 
-		// temp buffers
-		updateBuffer(tmpVertexBuffer, GL43C.GL_ARRAY_BUFFER, vertexBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
-		updateBuffer(tmpUvBuffer, GL43C.GL_ARRAY_BUFFER, uvBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+		// temp buffers (zone mode's stages at their places in them)
+		if (stagedV > 0 || stagedUv > 0)
+		{
+			uploadStaged(tmpVertexBuffer, vertexBuffer, splitV, stagedV, false);
+			uploadStaged(tmpUvBuffer, uvBuffer, splitUv, stagedUv);
+			stagedV = stagedUv = 0;
+		}
+		else
+		{
+			updateBuffer(tmpVertexBuffer, GL43C.GL_ARRAY_BUFFER, vertexBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+			updateBuffer(tmpUvBuffer, GL43C.GL_ARRAY_BUFFER, uvBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+		}
 
 		// model buffers
 		updateBuffer(tmpModelBufferLarge, GL43C.GL_ARRAY_BUFFER, modelBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
@@ -2814,6 +2847,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
+		// zone mode's walk reads the new scene whole before its first frame
+		fastOrder.invalidateAll();
 
 		if (computeMode == ComputeMode.OPENCL)
 		{
@@ -2859,11 +2894,17 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
-		synchronized (zoneLock)
+		final Stage[] st = stages;
+		if (st == null)
 		{
-			// (timed inside the lock: the copying itself, not the wait for another render thread's)
+			return;
+		}
+		// the client's own thread is -1, its render threads 0 and up: each its own stage, so none waits for another
+		final Stage stage = st[Math.max(0, Math.min(st.length - 1, renderThreadId + 1))];
+		synchronized (stage)
+		{
 			final long t0 = timing ? System.nanoTime() : 0;
-			zoneDyn.put(r, zoneUpload(scene, r, m, orient, x, y, z, tileObject.getHash()));
+			stageUpload(stage, scene, r, m, orient, x, y, z, tileObject.getHash(), r, false);
 			if (timing)
 			{
 				timer.zoneCopy(System.nanoTime() - t0);
@@ -2879,7 +2920,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
-		synchronized (zoneLock)
+		final Stage[] st = stages;
+		if (st == null)
+		{
+			return;
+		}
+		// (the client hands the temporary objects over on its own thread, ei.hw, in its order for them: kept, for the
+		// order of a tile's objects)
+		final Stage stage = st[0];
+		synchronized (stage)
 		{
 			final long t0 = timing ? System.nanoTime() : 0;
 			if (temps == tempG.length)
@@ -2887,7 +2936,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				tempG = Arrays.copyOf(tempG, temps * 2);
 			}
 			tempG[temps++] = gameObject;
-			zoneTemp.put(gameObject, zoneUpload(scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash()));
+			stageUpload(stage, scene, gameObject.getRenderable(), m, orient, x, y, z, gameObject.getHash(), gameObject, true);
 			if (timing)
 			{
 				timer.zoneCopy(System.nanoTime() - t0);
@@ -2895,14 +2944,74 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
-	// a moving model copied into the frame's temporary buffers now (the drawRenderable's temporary branch, its first
-	// half): its index, or -1 when it's out of view
-	private int zoneUpload(Scene scene, Renderable r, Model model, int orientation, int x, int y, int z, long hash)
+	/**
+	 * Zone mode's copies of the moving models the client hands over (stage B's speed work, 11/19/2026): a stage for each
+	 * thread that hands them over (0 the client's own, 1 and up its render threads, by their number), each copied into
+	 * on its own thread without waiting for the others (before, one lock: the render threads took turns). When the frame
+	 * is drawn the stages are put in place (zoneMerge: their copies numbered for zoneQueue, after whatever the client's
+	 * own thread had put in the frame's temporary buffer by then) and uploaded straight into the card's temporary buffer
+	 * at their places (uploadStaged), so nothing is copied twice.
+	 */
+	private static final class Stage
 	{
+		final GpuIntBuffer vb = new GpuIntBuffer();
+		final GpuFloatBuffer ub = new GpuFloatBuffer();
+		// its vertices and texture points so far, its copies
+		int v, uv, n;
+		// each copy: the dynamic object's renderable or the temporary object, whether temporary, its place in the
+		// stage (-1 length: out of view), its draw's flags and place, whether see-through, render mode 2
+		Object[] key = new Object[64];
+		boolean[] temp = new boolean[64], see = new boolean[64], painter = new boolean[64];
+		int[] off = new int[64], uvOff = new int[64], len = new int[64], flags = new int[64], x = new int[64], y = new int[64], z = new int[64];
+		// where its vertices and texture points start in the frame's temporary buffers (set by zoneMerge)
+		int base, uvBase;
+
+		void clear()
+		{
+			vb.clear();
+			ub.clear();
+			v = uv = n = 0;
+			Arrays.fill(key, null);
+		}
+
+		int add()
+		{
+			if (n == key.length)
+			{
+				int k = n * 2;
+				key = Arrays.copyOf(key, k);
+				temp = Arrays.copyOf(temp, k);
+				see = Arrays.copyOf(see, k);
+				painter = Arrays.copyOf(painter, k);
+				off = Arrays.copyOf(off, k);
+				uvOff = Arrays.copyOf(uvOff, k);
+				len = Arrays.copyOf(len, k);
+				flags = Arrays.copyOf(flags, k);
+				x = Arrays.copyOf(x, k);
+				y = Arrays.copyOf(y, k);
+				z = Arrays.copyOf(z, k);
+			}
+			return n++;
+		}
+	}
+
+	private Stage[] stages;
+	// this frame's stages in the temporary buffers: where they go (the client's own thread's content before them), and
+	// their vertices and texture points in all
+	private int splitV, splitUv, stagedV, stagedUv;
+
+	// a moving model copied into its thread's stage now (the drawRenderable's temporary branch, its first half)
+	private void stageUpload(Stage s, Scene scene, Renderable r, Model model, int orientation, int x, int y, int z, long hash,
+		Object key, boolean temp)
+	{
+		final int i = s.add();
+		s.key[i] = key;
+		s.temp[i] = temp;
 		model.calculateBoundsCylinder();
 		if (!visibleModel(null, model, x, y, z))
 		{
-			return -1;
+			s.len[i] = -1;
+			return;
 		}
 		if (Build.DEVELOPER && logPlayerModelNext && r == client.getLocalPlayer())
 		{
@@ -2913,37 +3022,157 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		final boolean painter = painterModels && r != null && r.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		final boolean hasUv = SceneUploader.hasUv(model);
-		final int len = sceneUploader.pushModel(model, vertexBuffer, uvBuffer);
-		if (ups == upOff.length)
-		{
-			int k = ups * 2;
-			upOff = Arrays.copyOf(upOff, k);
-			upUv = Arrays.copyOf(upUv, k);
-			upLen = Arrays.copyOf(upLen, k);
-			upFlags = Arrays.copyOf(upFlags, k);
-			upX = Arrays.copyOf(upX, k);
-			upY = Arrays.copyOf(upY, k);
-			upZ = Arrays.copyOf(upZ, k);
-			upSee = Arrays.copyOf(upSee, k);
-			upPainter = Arrays.copyOf(upPainter, k);
-		}
-		final int i = ups++;
+		final int len = sceneUploader.pushModel(model, s.vb, s.ub);
 		final int m = markOf(scene, r, x, z, hash);
-		upOff[i] = tempOffset;
-		upUv[i] = hasUv ? tempUvOffset : -1;
-		upLen[i] = len;
-		upFlags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
-		upX[i] = x;
-		upY[i] = y;
-		upZ[i] = z;
-		upSee[i] = model.getFaceTransparencies() != null || model.getTransparency() != 0;
-		upPainter[i] = painter;
-		tempOffset += len;
+		s.off[i] = s.v;
+		s.uvOff[i] = hasUv ? s.uv : -1;
+		s.len[i] = len;
+		s.flags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+		s.x[i] = x;
+		s.y[i] = y;
+		s.z[i] = z;
+		s.see[i] = model.getFaceTransparencies() != null || model.getTransparency() != 0;
+		s.painter[i] = painter;
+		s.v += len;
 		if (hasUv)
 		{
-			tempUvOffset += len;
+			s.uv += len;
 		}
-		return i;
+	}
+
+	// the stages put in place (the client and its render threads have handed everything over by postSceneDraw): each
+	// copy numbered for zoneQueue, the dynamic and temporary objects' maps filled, the client's own thread's further
+	// copies after them
+	private void zoneMerge()
+	{
+		final Stage[] st = stages;
+		splitV = tempOffset;
+		splitUv = tempUvOffset;
+		stagedV = stagedUv = 0;
+		if (st == null)
+		{
+			return;
+		}
+		int v = 0, uv = 0;
+		for (Stage s : st)
+		{
+			s.base = v;
+			s.uvBase = uv;
+			v += s.v;
+			uv += s.uv;
+		}
+		stagedV = v;
+		stagedUv = uv;
+		for (Stage s : st)
+		{
+			for (int k = 0; k < s.n; k++)
+			{
+				int idx = -1;
+				if (s.len[k] >= 0)
+				{
+					if (ups == upOff.length)
+					{
+						int c = ups * 2;
+						upOff = Arrays.copyOf(upOff, c);
+						upUv = Arrays.copyOf(upUv, c);
+						upLen = Arrays.copyOf(upLen, c);
+						upFlags = Arrays.copyOf(upFlags, c);
+						upX = Arrays.copyOf(upX, c);
+						upY = Arrays.copyOf(upY, c);
+						upZ = Arrays.copyOf(upZ, c);
+						upSee = Arrays.copyOf(upSee, c);
+						upPainter = Arrays.copyOf(upPainter, c);
+					}
+					idx = ups++;
+					upOff[idx] = splitV + s.base + s.off[k];
+					upUv[idx] = s.uvOff[k] < 0 ? -1 : splitUv + s.uvBase + s.uvOff[k];
+					upLen[idx] = s.len[k];
+					upFlags[idx] = s.flags[k];
+					upX[idx] = s.x[k];
+					upY[idx] = s.y[k];
+					upZ[idx] = s.z[k];
+					upSee[idx] = s.see[k];
+					upPainter[idx] = s.painter[k];
+				}
+				if (s.temp[k])
+				{
+					zoneTemp.put((GameObject) s.key[k], idx);
+				}
+				else
+				{
+					zoneDyn.put((Renderable) s.key[k], idx);
+				}
+			}
+		}
+		tempOffset = splitV + stagedV;
+		tempUvOffset = splitUv + stagedUv;
+	}
+
+	// a temporary buffer with this frame's stages: what the client's own thread put there before them (to split), the
+	// stages at their places, the rest after them
+	private void uploadStaged(GLBuffer glBuffer, IntBuffer main, int split, int staged, boolean texture)
+	{
+		final int total = (main.remaining() + staged * 4) << 2;
+		updateBuffer(glBuffer, GL43C.GL_ARRAY_BUFFER, total, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+		final int lim = main.limit();
+		if (split > 0)
+		{
+			main.limit(split * 4);
+			GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, 0, main);
+		}
+		main.limit(lim);
+		main.position(split * 4);
+		if (main.remaining() > 0)
+		{
+			GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, (long) (split + staged) << 4, main);
+		}
+		main.position(0);
+		for (Stage s : stages)
+		{
+			if ((texture ? s.uv : s.v) == 0)
+			{
+				continue;
+			}
+			final long at = (long) (split + (texture ? s.uvBase : s.base)) << 4;
+			if (texture)
+			{
+				s.ub.flip();
+				GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, at, s.ub.getBuffer());
+			}
+			else
+			{
+				s.vb.flip();
+				GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, at, s.vb.getBuffer());
+			}
+		}
+	}
+
+	private void uploadStaged(GLBuffer glBuffer, FloatBuffer main, int split, int staged)
+	{
+		final int total = (main.remaining() + staged * 4) << 2;
+		updateBuffer(glBuffer, GL43C.GL_ARRAY_BUFFER, total, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+		final int lim = main.limit();
+		if (split > 0)
+		{
+			main.limit(split * 4);
+			GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, 0, main);
+		}
+		main.limit(lim);
+		main.position(split * 4);
+		if (main.remaining() > 0)
+		{
+			GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, (long) (split + staged) << 4, main);
+		}
+		main.position(0);
+		for (Stage s : stages)
+		{
+			if (s.uv == 0)
+			{
+				continue;
+			}
+			s.ub.flip();
+			GL43C.glBufferSubData(GL43C.GL_ARRAY_BUFFER, (long) (split + s.uvBase) << 4, s.ub.getBuffer());
+		}
 	}
 
 	// an upload put in the model list at this point of the order (the temporary branch's second half)
@@ -2968,6 +3197,17 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (upPainter[i] && len > 0)
 		{
 			painterRange(before, len);
+		}
+	}
+
+	// zone mode: the client says a zone of a scene changed (an object, wall, decoration, ground object or item put there
+	// or taken away, an animated object come to rest; extended tiles >> 3): the walk reads it again before the next frame
+	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (zoneMode && scene != null && scene.getWorldViewId() == WorldView.TOPLEVEL)
+		{
+			fastOrder.invalidate(zx, zz);
 		}
 	}
 
@@ -2997,6 +3237,56 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	}
 
 	private boolean zoneWarned;
+	// zone mode's reading since the last log: whole scenes, zones and tiles read again
+	private int zoneFullReads, zoneReadZones;
+	private long zoneReadSlots;
+	// the developer check (Zone mode: check the walk): every 30th frame, the walk from the kept scene against CpuOrder
+	// reading the scene afresh, entry for entry
+	private volatile boolean zoneCheck;
+	private int zoneChecks, zoneCheckFrames, zoneCheckDiffer;
+	private long lastZoneCheckLog;
+	private String zoneCheckExample;
+
+	private void checkZoneWalk(Scene scene, int cx, int cz, int distance, CpuOrder.Visible visible)
+	{
+		cpuOrder.setTemps(tempG, temps);
+		cpuOrder.build(scene, cx, cz, distance, visible);
+		cpuOrder.setTemps(null, 0);
+		final FastOrder f = fastOrder;
+		final CpuOrder c = cpuOrder;
+		boolean same = f.n == c.n && f.gaveUp == c.gaveUp;
+		int at = -1;
+		for (int k = 0, n = Math.min(f.n, c.n); k < n; k++)
+		{
+			if (f.keys[k] != c.keys[k] || f.kx[k] != c.kx[k] || f.kz[k] != c.kz[k])
+			{
+				same = false;
+				at = k;
+				break;
+			}
+		}
+		zoneCheckFrames++;
+		if (!same)
+		{
+			zoneCheckDiffer++;
+			if (zoneCheckExample == null)
+			{
+				zoneCheckExample = at < 0 ? String.format("%d entries against %d", f.n, c.n)
+					: String.format("%d entries against %d, first at %d: %s at %d %d against %s at %d %d", f.n, c.n, at,
+					f.keys[at] == null ? "nothing" : f.keys[at].getClass().getSimpleName(), f.kx[at], f.kz[at],
+					c.keys[at] == null ? "nothing" : c.keys[at].getClass().getSimpleName(), c.kx[at], c.kz[at]);
+			}
+		}
+		final long now = System.nanoTime();
+		if (now - lastZoneCheckLog > 5_000_000_000L)
+		{
+			lastZoneCheckLog = now;
+			log.info("Bitcrush zone mode's check: {} frames' walks from the kept scene against the scene read afresh, {} differing{}",
+				zoneCheckFrames, zoneCheckDiffer, zoneCheckExample != null ? " (the first: " + zoneCheckExample + ")" : "");
+			zoneCheckFrames = zoneCheckDiffer = 0;
+			zoneCheckExample = null;
+		}
+	}
 
 	// The frame in zone mode: the CPU's order from CPU Look's own walk (the static scene from its tiles, this frame's
 	// temporary objects put on theirs), each draw in full from the client's getters (FastOrder.draw, checked against the
@@ -3008,6 +3298,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
+		zoneMerge();
 		final int[][][] roofs = scene.getRoofs();
 		final byte[][][] settings = scene.getExtendedTileSettings();
 		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
@@ -3072,8 +3363,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			zoneWhyNext = true;
 		}
 		fastOrder.setTemps(tempG, temps);
-		fastOrder.build(scene, cx, cz, distance, visible);
+		fastOrder.buildCached(scene, cx, cz, distance, visible);
 		fastOrder.setTemps(null, 0);
+		zoneReadZones += fastOrder.zonesRead;
+		zoneFullReads += fastOrder.fullRead ? 1 : 0;
+		zoneReadSlots += fastOrder.slotsRead;
 		final boolean reference = fastOrder.overflowed;
 		if (reference)
 		{
@@ -3086,10 +3380,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			timer.order(System.nanoTime() - t0, reference ? cpuOrder.n : fastOrder.n, fastOrder.readNs,
 				fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
 		}
+		if (Build.DEVELOPER && zoneCheck && !reference && ++zoneChecks % 30 == 0)
+		{
+			checkZoneWalk(scene, cx, cz, distance, visible);
+		}
 		if (zoneWhyNext)
 		{
 			zoneWhyNext = false;
 			lastZoneWhyLog = System.nanoTime();
+			log.info("Bitcrush zone mode's reading: the whole scene {} times, zones read again {} ({} tiles with the objects reaching out of them)",
+				zoneFullReads, zoneReadZones, zoneReadSlots - zoneFullReads * 4 * Constants.EXTENDED_SCENE_SIZE * Constants.EXTENDED_SCENE_SIZE);
+			zoneFullReads = zoneReadZones = 0;
+			zoneReadSlots = 0;
 			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}; tiles under a bridge given another level by the settings read before bridges {}",
 				scene.getMinLevel(), level, maxLevel, scene.getRoofRemovalMode(), hide, framePlane,
 				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3], why[4]);
@@ -3104,11 +3406,280 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 		final int[] params = new int[4];
+		// the static draws from their prepared records (made the first time each is drawn, kept until its zone is read
+		// again or the scene changes); the rest, and every draw while a diagnostic needs each call, as before
+		final boolean prepared = !orderTest && !drawOrderLog.recording();
+		if (prepared)
+		{
+			final int key = (groundHides ? 1 : 0) | (painterModels ? 2 : 0) | sceneId << 2;
+			if (key != recsKey)
+			{
+				fastOrder.dropRecords();
+				recsKey = key;
+			}
+			if (fastOrder.records != recsSeen)
+			{
+				nRecs = 0;
+				recsSeen = fastOrder.records;
+			}
+			if (nRecs > (1 << 20))
+			{
+				// (records left by zones read again pile up; start again past a million)
+				fastOrder.dropRecords();
+				nRecs = 0;
+				recsSeen = fastOrder.records;
+			}
+		}
+		final long loop0 = timing ? System.nanoTime() : 0, apart0 = timing ? timer.callbacksSoFar() : 0;
+		int fast = 0;
 		for (int k = 0; k < fastOrder.n; k++)
 		{
+			if (prepared)
+			{
+				int r = record(scene, k, params);
+				if (r >= 0)
+				{
+					drawRecord(r);
+					fast++;
+					continue;
+				}
+			}
 			zoneEntry(scene, fastOrder.keys[k], fastOrder.ksrc[k], fastOrder.kkind[k], k, params);
 		}
+		if (timing)
+		{
+			timer.callbacks(System.nanoTime() - loop0 - (timer.callbacksSoFar() - apart0), fast);
+		}
+		if (Build.DEVELOPER && zoneCheck && prepared && zoneChecks % 30 == 0)
+		{
+			checkRecords(scene, params);
+		}
 	}
+
+	// ---- zone mode's prepared draws (stage B's speed work, 11/19/2026) ----
+	// A static draw's record, REC ints: its buffer offset, texture offset, faces, flags, x, y, z; then for a model its
+	// bounds for the culling (xz magnitude, bottom, height), for the ground the place it takes; and what it is (RB_*).
+	// The same numbers the old path's callbacks put in the draw buffers (drawRenderable's scene-buffer branch,
+	// drawScenePaint0, drawSceneTileModel0), worked out once; RuneLite's hide hooks asked then too, as RuneLite's own
+	// zone renderer asks them when it uploads a zone (SceneUploader.uploadZoneTile).
+	private static final int REC = 12, RB_MODEL = 1, RB_SEE = 2, RB_PAINTER = 4, RB_GROUND = 8, RB_NONE = 16;
+	private int[] recs = new int[REC * 16384];
+	private int nRecs, recsSeen = -1, recsKey = -1;
+	private final int[] recCheck = new int[REC];
+	private int recChecked, recDiffer;
+	private String recExample;
+
+	// entry k's record (made the first time it's drawn): its index, or -2 when it isn't a static draw
+	private int record(Scene scene, int k, int[] params)
+	{
+		final FastOrder f = fastOrder;
+		final int ref = f.kref[k];
+		if (ref == -1)
+		{
+			return -2;
+		}
+		int r = ref >= 0 ? f.tileRec[ref] : f.oRec[-ref - 2];
+		if (r != -1)
+		{
+			return r;
+		}
+		if ((nRecs + 1) * REC > recs.length)
+		{
+			recs = Arrays.copyOf(recs, recs.length * 2);
+		}
+		r = prepare(scene, k, params, recs, nRecs * REC) ? nRecs++ : -2;
+		if (ref >= 0)
+		{
+			f.tileRec[ref] = r;
+		}
+		else
+		{
+			f.oRec[-ref - 2] = r;
+		}
+		return r;
+	}
+
+	// entry k's record into out from at; false when it isn't a static draw (one for drawRenderable's other branches)
+	private boolean prepare(Scene scene, int k, int[] params, int[] out, int at)
+	{
+		final FastOrder f = fastOrder;
+		final Object key = f.keys[k], src = f.ksrc[k];
+		if (f.kkind[k] == FastOrder.K_GROUND)
+		{
+			if (!(src instanceof Tile))
+			{
+				return false;
+			}
+			final Tile tile = (Tile) src;
+			final boolean shown = renderCallbackManager.drawTile(scene, tile);
+			final net.runelite.api.Point loc = tile.getSceneLocation();
+			int offset, uv, faces, len;
+			if (key instanceof SceneTilePaint)
+			{
+				SceneTilePaint paint = (SceneTilePaint) key;
+				offset = paint.getBufferOffset();
+				uv = paint.getUvBufferOffset();
+				faces = 2;
+				len = paint.getBufferLen() > 0 ? 6 : 0;
+			}
+			else if (key instanceof SceneTileModel)
+			{
+				SceneTileModel model = (SceneTileModel) key;
+				offset = model.getBufferOffset();
+				uv = model.getUvBufferOffset();
+				faces = model.getBufferLen() / 3;
+				len = model.getBufferLen() > 0 ? model.getBufferLen() : 0;
+			}
+			else
+			{
+				return false;
+			}
+			out[at] = offset;
+			out[at + 1] = uv;
+			out[at + 2] = faces;
+			out[at + 3] = FLAG_SCENE_BUFFER | (groundHides ? FLAG_GROUND : 0);
+			out[at + 4] = loc.getX() << Perspective.LOCAL_COORD_BITS;
+			out[at + 5] = 0;
+			out[at + 6] = loc.getY() << Perspective.LOCAL_COORD_BITS;
+			out[at + 7] = len;
+			out[at + 8] = out[at + 9] = 0;
+			out[at + 10] = RB_GROUND | (shown && len > 0 ? 0 : RB_NONE);
+			out[at + 11] = 0;
+			return true;
+		}
+		if (!(key instanceof Model))
+		{
+			return false;
+		}
+		final Model model = (Model) key;
+		Model offsetModel = model.getUnskewedModel();
+		if (offsetModel == null)
+		{
+			offsetModel = model;
+		}
+		if (offsetModel.getSceneId() != sceneId)
+		{
+			return false;
+		}
+		final boolean shown = !(src instanceof TileObject) || renderCallbackManager.drawObject(scene, (TileObject) src);
+		final long hash = f.draw(k, params);
+		if (params[0] < 0)
+		{
+			return false;
+		}
+		final int x = params[1], y = params[2], z = params[3];
+		model.calculateBoundsCylinder();
+		final boolean see = model.getFaceTransparencies() != null || model.getTransparency() != 0;
+		final boolean painter = painterModels && model.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		final int plane = (int) ((hash >> TileObject.HASH_PLANE_SHIFT) & 3);
+		final boolean hillskew = offsetModel != model;
+		final int m = markOf(scene, model, x, z, hash);
+		out[at] = offsetModel.getBufferOffset();
+		out[at + 1] = offsetModel.getUvBufferOffset();
+		out[at + 2] = Math.min(MAX_TRIANGLE, offsetModel.getFaceCount());
+		out[at + 3] = FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | params[0]
+			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+		out[at + 4] = x;
+		out[at + 5] = y;
+		out[at + 6] = z;
+		out[at + 7] = model.getXYZMag();
+		out[at + 8] = model.getBottomY();
+		out[at + 9] = model.getModelHeight();
+		out[at + 10] = RB_MODEL | (see ? RB_SEE : 0) | (painter ? RB_PAINTER : 0) | (shown ? 0 : RB_NONE);
+		out[at + 11] = 0;
+		return true;
+	}
+
+	// a prepared draw into the frame's draw buffers, as its callback would have put it
+	private void drawRecord(int r)
+	{
+		final int[] R = recs;
+		final int b = r * REC, bits = R[b + 10];
+		if ((bits & RB_NONE) != 0)
+		{
+			return;
+		}
+		if ((bits & RB_GROUND) != 0)
+		{
+			GpuIntBuffer g = modelBufferUnordered;
+			++unorderedModels;
+			tierFaces[0] += R[b + 2];
+			g.ensureCapacity(8);
+			g.getBuffer().put(R[b]).put(R[b + 1]).put(R[b + 2]).put(targetBufferOffset).put(R[b + 3])
+				.put(R[b + 4]).put(R[b + 5]).put(R[b + 6]);
+			targetBufferOffset += R[b + 7];
+			return;
+		}
+		if (!isVisible(R[b + 7], R[b + 8], R[b + 9], framePitchSin, framePitchCos, frameYawSin, frameYawCos,
+			R[b + 4] - frameCamX, R[b + 5] - frameCamY, R[b + 6] - frameCamZ))
+		{
+			return;
+		}
+		final int tc = R[b + 2];
+		final GpuIntBuffer g = bufferForTriangles(tc);
+		g.ensureCapacity(8);
+		g.getBuffer().put(R[b]).put(R[b + 1]).put(tc).put(targetBufferOffset).put(R[b + 3])
+			.put(R[b + 4]).put(R[b + 5]).put(R[b + 6]);
+		final int before = targetBufferOffset;
+		targetBufferOffset += tc * 3;
+		if (tc > 0)
+		{
+			if ((bits & RB_SEE) != 0)
+			{
+				seeRange(before, tc * 3);
+			}
+			if ((bits & RB_PAINTER) != 0)
+			{
+				painterRange(before, tc * 3);
+			}
+		}
+	}
+
+	// the developer check (Zone mode: check the walk): every prepared draw this frame worked out again from the client's
+	// getters, against its record
+	private void checkRecords(Scene scene, int[] params)
+	{
+		final FastOrder f = fastOrder;
+		for (int k = 0; k < f.n; k++)
+		{
+			final int ref = f.kref[k];
+			if (ref == -1)
+			{
+				continue;
+			}
+			final int r = ref >= 0 ? f.tileRec[ref] : f.oRec[-ref - 2];
+			if (r < 0)
+			{
+				continue;
+			}
+			recChecked++;
+			boolean same = prepare(scene, k, params, recCheck, 0);
+			for (int j = 0; same && j < REC; j++)
+			{
+				same = recCheck[j] == recs[r * REC + j];
+			}
+			if (!same)
+			{
+				recDiffer++;
+				if (recExample == null)
+				{
+					recExample = String.format("%s at %d %d: kept %s, now %s", f.keys[k].getClass().getSimpleName(), f.kx[k], f.kz[k],
+						Arrays.toString(Arrays.copyOfRange(recs, r * REC, r * REC + REC)), Arrays.toString(recCheck));
+				}
+			}
+		}
+		final long now = System.nanoTime();
+		if (now - lastRecCheckLog > 5_000_000_000L)
+		{
+			lastRecCheckLog = now;
+			log.info("Bitcrush zone mode's prepared draws: {} checked against the client's getters, {} differing{}; {} kept",
+				recChecked, recDiffer, recExample != null ? " (the first: " + recExample + ")" : "", nRecs);
+			recChecked = recDiffer = 0;
+			recExample = null;
+		}
+	}
+
+	private long lastRecCheckLog;
 
 	// one entry of the walk, drawn as the old mode's callbacks would have drawn it
 	private void zoneEntry(Scene scene, Object key, Object src, byte kind, int k, int[] params)
@@ -3289,21 +3860,28 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		return true;
 	}
 
+	private void readClip()
+	{
+		clipZoom = client.get3dZoom();
+		clipMidX2 = client.getRasterizer3D_clipMidX2();
+		clipNegMidX = client.getRasterizer3D_clipNegativeMidX();
+		clipNegMidY = client.getRasterizer3D_clipNegativeMidY();
+		clipMidY2 = client.getRasterizer3D_clipMidY2();
+		clipRead = true;
+	}
+
 	private boolean isVisible(Model model, float pitchSin, float pitchCos, float yawSin, float yawCos, int x, int y, int z)
 	{
-		final int xzMag = model.getXYZMag();
-		final int bottomY = model.getBottomY();
+		return isVisible(model.getXYZMag(), model.getBottomY(), model.getModelHeight(), pitchSin, pitchCos, yawSin, yawCos, x, y, z);
+	}
+
+	private boolean isVisible(int xzMag, int bottomY, int modelHeight, float pitchSin, float pitchCos, float yawSin, float yawCos, int x, int y, int z)
+	{
 		if (!clipRead)
 		{
-			clipZoom = client.get3dZoom();
-			clipMidX2 = client.getRasterizer3D_clipMidX2();
-			clipNegMidX = client.getRasterizer3D_clipNegativeMidX();
-			clipNegMidY = client.getRasterizer3D_clipNegativeMidY();
-			clipMidY2 = client.getRasterizer3D_clipMidY2();
-			clipRead = true;
+			readClip();
 		}
 		final int zoom = clipZoom;
-		final int modelHeight = model.getModelHeight();
 
 		int Rasterizer3D_clipMidX2 = clipMidX2; // width / 2
 		int Rasterizer3D_clipNegativeMidX = clipNegMidX; // -width / 2

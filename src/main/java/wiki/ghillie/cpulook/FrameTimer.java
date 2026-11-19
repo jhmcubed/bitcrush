@@ -130,6 +130,19 @@ class FrameTimer
 		frameDraws++;
 	}
 
+	// zone mode's prepared draws: a run of them timed as one (count draws in ns)
+	void callbacks(long ns, int count)
+	{
+		frameCallbacks += ns;
+		frameDraws += count;
+	}
+
+	// the calls' time so far this frame (to take the ones timed apart out of a run timed whole)
+	long callbacksSoFar()
+	{
+		return frameCallbacks;
+	}
+
 	void postStart()
 	{
 		postStart = System.nanoTime();
@@ -416,10 +429,10 @@ class FrameTimer
 			post / n / 1e6, drawing / n / 1e6, upload / n / 1e6, sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
 			triangles / n,
 			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below), and its copying of the "
-				+ "moving models the client hands over %.2f (%.0f models; on the client's render threads, one at a time, so partly "
-				+ "beside the client's own work)", zoneCopyNs / n / 1e6, zoneCopies / n) : "")
+				+ "moving models the client hands over %.2f (%.0f models; added up over the client's threads, each copying its own "
+				+ "at the same time as the others, so the frame waits for less than this)", zoneCopyNs / n / 1e6, zoneCopies / n) : "")
 			+ (orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
-				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene %.2f, which tiles are in view %.2f, the sweep "
+				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene, in zone mode the zones read again and the temporary objects put on, %.2f, which tiles are in view %.2f, the sweep "
 				+ "%.2f), checked against the reference walk in %d frames, %d differing", orderNs / (double) orderFrames / 1e6,
 				orderDraws / (double) orderFrames, orderReadNs / (double) orderFrames / 1e6, orderViewNs / (double) orderFrames / 1e6,
 				orderSweepNs / (double) orderFrames / 1e6, orderChecked, orderDiffered) : "")));

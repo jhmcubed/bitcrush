@@ -365,6 +365,7 @@ final class FastOrder
 			overflowed = true;
 			return;
 		}
+		putItems();
 		readNs = System.nanoTime() - t0;
 		view(scene, visible);
 		setupNs = System.nanoTime() - t0;
@@ -667,7 +668,7 @@ final class FastOrder
 		{
 			for (GameObject g : gos)
 			{
-				if (g == null)
+				if (g == null || !scenery(g))
 				{
 					continue;
 				}
@@ -689,7 +690,70 @@ final class FastOrder
 				}
 			}
 		}
-		read(tile, i, b);
+		read(tile, i, b, false);
+	}
+
+	/**
+	 * Whether a game object on a tile is scenery (its tag's type, bits 16-18, is 2, as the client's own despawn reads it,
+	 * ei.an). In zone mode the client also lists the frame's temporary objects (players, NPCs, projectiles, graphics) in
+	 * the tiles' lists (ei.bu, from a pool it reuses), and hands them over by drawTemp: only the scenery is kept
+	 * (11/19/2026: kept, they stayed as NPCs no longer there).
+	 */
+	static boolean scenery(GameObject g)
+	{
+		return (g.getHash() >> 16 & 7) == 2;
+	}
+
+	// zone mode's ground items this frame: the item piles the client handed over (drawDynamic; it never tells of items
+	// put down or picked up, ei.ek and ei.ge, so the kept tiles hold none), put on their tiles for the frame
+	private ItemLayer[] items = new ItemLayer[0];
+	private int nItems;
+	private int[] itemSlot = new int[64], itemHas = new int[64];
+	private int nItemSlots;
+
+	void setItems(ItemLayer[] l, int count)
+	{
+		items = l;
+		nItems = l == null ? 0 : count;
+	}
+
+	private void putItems()
+	{
+		nItemSlots = 0;
+		for (int k = 0; k < nItems; k++)
+		{
+			final ItemLayer il = items[k];
+			if (il == null)
+			{
+				continue;
+			}
+			final int p = il.getPlane(), x = (il.getX() >> 7) + OFFSET, y = (il.getY() >> 7) + OFFSET;
+			if (p < 0 || p > 3 || x < 0 || y < 0 || x >= SIZE || y >= SIZE)
+			{
+				continue;
+			}
+			final int i = (p * SIZE + x) * SIZE + y, b = i * STRIDE, r = i * RSTRIDE;
+			if (tileAt[i] == null || (st[b + HAS] & H_ITEMS) != 0)
+			{
+				continue;
+			}
+			if (nItemSlots == itemSlot.length)
+			{
+				itemSlot = Arrays.copyOf(itemSlot, nItemSlots * 2);
+				itemHas = Arrays.copyOf(itemHas, nItemSlots * 2);
+			}
+			itemSlot[nItemSlots] = i;
+			itemHas[nItemSlots] = st[b + HAS];
+			nItemSlots++;
+			st[b + HAS] |= H_ITEMS;
+			st[b + IH] = il.getHeight();
+			st[b + IX] = il.getX();
+			st[b + IY] = il.getY();
+			refs[r + R_IM] = il.getMiddle();
+			refs[r + R_IT] = il.getTop();
+			refs[r + R_IB] = il.getBottom();
+			refs[r + R_IL] = il;
+		}
 	}
 
 	// this frame's temporary objects onto the tiles under them (each made once, as CpuOrder finds them by identity);
@@ -752,6 +816,11 @@ final class FastOrder
 		nTempSlots = 0;
 		tempIndex.clear();
 		nObj = nStatic;
+		for (int k = 0; k < nItemSlots; k++)
+		{
+			st[itemSlot[k] * STRIDE + HAS] = itemHas[k];
+		}
+		nItemSlots = 0;
 	}
 
 	// every tile in the square into its slot: its objects (and the temporary ones on it), and what the sweep needs
@@ -857,6 +926,13 @@ final class FastOrder
 	// everything the sweep needs from the tile, into its slot (b: the slot's place in st)
 	private void read(Tile tile, int i, int b)
 	{
+		read(tile, i, b, true);
+	}
+
+	// items: whether to read the tile's items (zone mode keeps none: the client changes them without telling, and hands
+	// over the ones it draws each frame; putItems)
+	private void read(Tile tile, int i, int b, boolean items)
+	{
 		final int r = i * RSTRIDE;
 		int has = 0;
 		Object ground = tile.getSceneTilePaint();
@@ -900,7 +976,7 @@ final class FastOrder
 			refs[r + R_G] = g.getRenderable();
 			refs[r + R_GOBJ] = g;
 		}
-		ItemLayer il = tile.getItemLayer();
+		ItemLayer il = items ? tile.getItemLayer() : null;
 		if (il != null)
 		{
 			has |= H_ITEMS;

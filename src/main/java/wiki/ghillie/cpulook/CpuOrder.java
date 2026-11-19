@@ -101,10 +101,14 @@ final class CpuOrder
 	private GameObject[] temps = new GameObject[0];
 	private int nTemps;
 
+	// (with them, zone mode: the tiles' own lists give only their scenery, FastOrder.scenery)
+	private boolean sceneryOnly;
+
 	void setTemps(GameObject[] g, int count)
 	{
 		temps = g;
 		nTemps = g == null ? 0 : count;
+		sceneryOnly = g != null;
 	}
 
 	private O objectOf(GameObject g, int x, int y)
@@ -201,7 +205,7 @@ final class CpuOrder
 					{
 						for (GameObject g : gos)
 						{
-							if (g == null)
+							if (g == null || sceneryOnly && !FastOrder.scenery(g))
 							{
 								continue;
 							}

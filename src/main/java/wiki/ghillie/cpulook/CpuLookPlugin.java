@@ -2905,6 +2905,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			final long t0 = timing ? System.nanoTime() : 0;
 			stageUpload(stage, scene, r, m, orient, x, y, z, tileObject.getHash(), r, false);
+			// (an item pile's items come this way in zone mode: their pile kept for the walk)
+			stage.owner[stage.n - 1] = tileObject;
 			if (timing)
 			{
 				timer.zoneCopy(System.nanoTime() - t0);
@@ -2960,7 +2962,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		int v, uv, n;
 		// each copy: the dynamic object's renderable or the temporary object, whether temporary, its place in the
 		// stage (-1 length: out of view), its draw's flags and place, whether see-through, render mode 2
-		Object[] key = new Object[64];
+		Object[] key = new Object[64], owner = new Object[64];
 		boolean[] temp = new boolean[64], see = new boolean[64], painter = new boolean[64];
 		int[] off = new int[64], uvOff = new int[64], len = new int[64], flags = new int[64], x = new int[64], y = new int[64], z = new int[64];
 		// where its vertices and texture points start in the frame's temporary buffers (set by zoneMerge)
@@ -2972,6 +2974,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			ub.clear();
 			v = uv = n = 0;
 			Arrays.fill(key, null);
+			Arrays.fill(owner, null);
 		}
 
 		int add()
@@ -2980,6 +2983,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				int k = n * 2;
 				key = Arrays.copyOf(key, k);
+				owner = Arrays.copyOf(owner, k);
 				temp = Arrays.copyOf(temp, k);
 				see = Arrays.copyOf(see, k);
 				painter = Arrays.copyOf(painter, k);
@@ -2996,6 +3000,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	}
 
 	private Stage[] stages;
+	// this frame's item piles, as handed over (the walk puts them on their tiles; FastOrder.putItems)
+	private net.runelite.api.ItemLayer[] itemLayers = new net.runelite.api.ItemLayer[64];
+	private int nItemLayers;
 	// this frame's stages in the temporary buffers: where they go (the client's own thread's content before them), and
 	// their vertices and texture points in all
 	private int splitV, splitUv, stagedV, stagedUv;
@@ -3006,6 +3013,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		final int i = s.add();
 		s.key[i] = key;
+		s.owner[i] = null;
 		s.temp[i] = temp;
 		model.calculateBoundsCylinder();
 		if (!visibleModel(null, model, x, y, z))
@@ -3049,6 +3057,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		splitV = tempOffset;
 		splitUv = tempUvOffset;
 		stagedV = stagedUv = 0;
+		nItemLayers = 0;
 		if (st == null)
 		{
 			return;
@@ -3101,6 +3110,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				else
 				{
 					zoneDyn.put((Renderable) s.key[k], idx);
+					final Object owner = s.owner[k];
+					if (owner instanceof net.runelite.api.ItemLayer && (nItemLayers == 0 || itemLayers[nItemLayers - 1] != owner))
+					{
+						if (nItemLayers == itemLayers.length)
+						{
+							itemLayers = Arrays.copyOf(itemLayers, nItemLayers * 2);
+						}
+						itemLayers[nItemLayers++] = (net.runelite.api.ItemLayer) owner;
+					}
 				}
 			}
 		}
@@ -3363,8 +3381,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			zoneWhyNext = true;
 		}
 		fastOrder.setTemps(tempG, temps);
+		fastOrder.setItems(itemLayers, nItemLayers);
 		fastOrder.buildCached(scene, cx, cz, distance, visible);
 		fastOrder.setTemps(null, 0);
+		fastOrder.setItems(null, 0);
 		zoneReadZones += fastOrder.zonesRead;
 		zoneFullReads += fastOrder.fullRead ? 1 : 0;
 		zoneReadSlots += fastOrder.slotsRead;

@@ -790,6 +790,8 @@ class SceneUploader
 
 	private static float[] modelCanvasX;
 	private static float[] modelCanvasY;
+	// each corner's camera-space ints, for the client's facing test of a face with a corner nearer than z = 50
+	private static int[] modelCamX, modelCamY, modelCamZ;
 
 	private static float[] modelLocalX;
 	private static float[] modelLocalY;
@@ -814,6 +816,9 @@ class SceneUploader
 
 		modelCanvasX = new float[MAX_VERTEX_COUNT];
 		modelCanvasY = new float[MAX_VERTEX_COUNT];
+		modelCamX = new int[MAX_VERTEX_COUNT];
+		modelCamY = new int[MAX_VERTEX_COUNT];
+		modelCamZ = new int[MAX_VERTEX_COUNT];
 
 		modelLocalX = new float[MAX_VERTEX_COUNT];
 		modelLocalY = new float[MAX_VERTEX_COUNT];
@@ -834,6 +839,9 @@ class SceneUploader
 
 		modelCanvasX = null;
 		modelCanvasY = null;
+		modelCamX = null;
+		modelCamY = null;
+		modelCamZ = null;
 
 		modelLocalX = null;
 		modelLocalY = null;
@@ -925,6 +933,9 @@ class SceneUploader
 			final float ty = vy * pitchCosF - tz * pitchSinF;
 			final float d = vy * pitchSinF + tz * pitchCosF;
 			distances[v] = (int) d - zero;
+			modelCamX[v] = (int) tx;
+			modelCamY[v] = (int) ty;
+			modelCamZ[v] = (int) d;
 			if (d >= 50.0f)
 			{
 				modelCanvasX[v] = centerX + tx * zoom / d;
@@ -962,7 +973,22 @@ class SceneUploader
 					cX = modelCanvasX[v3],
 					cY = modelCanvasY[v3];
 
-				if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) > 0)
+				// the client's facing test (fo.bv's am): with a corner nearer than z = 50 (its -5000 mark), in camera
+				// space on the corners' ints; else on the float screen points (11/19/2026: the -5000s went into the
+				// screen test, which isn't the client's)
+				final boolean facing;
+				if (aX == -5000.0f || bX == -5000.0f || cX == -5000.0f)
+				{
+					final int x1 = modelCamX[v2], y1 = modelCamY[v2], z1 = modelCamZ[v2];
+					final int ax = modelCamX[v1] - x1, ay = modelCamY[v1] - y1, az = modelCamZ[v1] - z1;
+					final int bx = modelCamX[v3] - x1, by = modelCamY[v3] - y1, bz = modelCamZ[v3] - z1;
+					facing = x1 * (ay * bz - az * by) + y1 * (az * bx - ax * bz) + z1 * (ax * by - ay * bx) > 0;
+				}
+				else
+				{
+					facing = (aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) > 0;
+				}
+				if (facing)
 				{
 					int distance = radius + (distances[v1] + distances[v2] + distances[v3]) / 3;
 					// whole-unit rounding can put a face a unit past the model's reach: keep it in the buckets

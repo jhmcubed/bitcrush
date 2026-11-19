@@ -143,6 +143,20 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		return !painter && m.getFaceTransparencies() == null && m.getTransparency() == 0 ? FLAG_ORDER : 0;
 	}
+
+	// a render mode 2 model's flags (11/19/2026): the painter mark, and in bits 11 to 21 its depth offset (Model.getRadius,
+	// the client's co: what it adds to a face's depth to make its bucket), which the compute pass needs for the client's
+	// average of a pair of priorities with no faces (0 in the client's buckets, so minus the offset in the pass's depths);
+	// past 2047 (no player comes near) the pass's comparison can differ only for faces over 2047 units behind the model
+	static int painterFlags(Model m, boolean painter)
+	{
+		if (!painter)
+		{
+			return 0;
+		}
+		m.calculateBoundsCylinder();  // the client's cu(), as its own draw calls first (nothing when already current)
+		return FLAG_PAINTER | Math.min(Math.max(m.getRadius(), 0), 2047) << 11;
+	}
 	// zoneEntry's draw of such an entry in full (drawRenderable's flags)
 	private boolean drawSolidOnly;
 	private static final int MARK_PAINTER = 0x200000;
@@ -3330,7 +3344,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		s.off[i] = s.v;
 		s.uvOff[i] = hasUv ? s.uv : -1;
 		s.len[i] = len;
-		s.flags[i] = FLAG_CAM | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+		s.flags[i] = FLAG_CAM | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(model, painter)
 			| (solidOnly ? FLAG_SOLID : 0) | faceOrder(model, painter);
 		s.x[i] = 0;
 		s.y[i] = BoatMath.originDepth(s.mat);
@@ -3886,7 +3900,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		s.off[i] = s.v;
 		s.uvOff[i] = hasUv ? s.uv : -1;
 		s.len[i] = len;
-		s.flags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+		s.flags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(model, painter)
 			| faceOrder(model, painter);
 		s.x[i] = x;
 		s.y[i] = y;
@@ -4909,7 +4923,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at + 1] = offsetModel.getUvBufferOffset();
 		out[at + 2] = Math.min(MAX_TRIANGLE, offsetModel.getFaceCount());
 		out[at + 3] = FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | params[0]
-			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0) | (solid ? FLAG_SOLID : 0)
+			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(offsetModel, painter) | (solid ? FLAG_SOLID : 0)
 			| faceOrder(offsetModel, painter);
 		out[at + 4] = x;
 		out[at + 5] = y;
@@ -5045,7 +5059,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at] = len;
 		out[at + 1] = hasUv ? 1 : 0;
 		out[at + 2] = 0;
-		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(still, painter)
 			| ((kind & FastOrder.K_SOLID) != 0 ? FLAG_SOLID : 0) | faceOrder(still, painter);
 		out[at + 4] = x;
 		out[at + 5] = y;
@@ -6016,7 +6030,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
 			buffer.put(FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | orientation
-				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(offsetModel, painter)
 				| (drawSolidOnly ? FLAG_SOLID : 0) | faceOrder(offsetModel, painter));
 			buffer.put(x).put(y).put(z);
 
@@ -6064,7 +6078,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(len / 3);
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
-			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | painterFlags(model, painter)
 				| (drawSolidOnly ? FLAG_SOLID : 0) | faceOrder(model, painter));
 			buffer.put(x).put(y).put(z);
 			noteDraw(renderable, x, z, b, pos, len, -1);

@@ -27,6 +27,31 @@ layout(binding = 2) uniform isampler3D tileHeightSampler;
 
 #include "cpu_turn.glsl"
 #include "cpu_depth.glsl"
+#include "fdiv.glsl"
+
+// Whether the client counts a face of a render mode 2 model toward its priorities' averages: the faces it doesn't
+// leave out (fo.bv's am), those turned toward the camera by its own test, the one setup.glsl culls by. With a corner
+// nearer than z = 50 (the client's -5000 mark), the test in camera space on the corners' ints; else on the float screen
+// points, mid + x * zoom / z rounded as Java's floats (setup.glsl's toCorner). k: the corners turned, camera space.
+// (11/19/2026: until then the GPU plugin's projection, which can call a face seen almost edge-on the other way, move
+// an average by a unit and with it faces of priority 10 and 11 to another place in the order: ShaderCheck's
+// painterOrder, the client's order written in Java, found 26 of 222 models drawn in another order.)
+bool cpu_facing(vec3 k0, vec3 k1, vec3 k2) {
+  if (!(k0.z >= 50.0 && k1.z >= 50.0 && k2.z >= 50.0)) {
+    ivec3 c0 = ivec3(int(k0.x), int(k0.y), int(k0.z)), c1 = ivec3(int(k1.x), int(k1.y), int(k1.z)), c2 = ivec3(int(k2.x), int(k2.y), int(k2.z));
+    int ax = c0.x - c1.x, bx = c2.x - c1.x, ay = c0.y - c1.y, by = c2.y - c1.y, az = c0.z - c1.z, bz = c2.z - c1.z;
+    int nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    return c1.x * nx + c1.y * ny + c1.z * nz > 0;
+  }
+  precise float x0 = float(centerX) + fdiv(k0.x * float(zoom), k0.z);
+  precise float y0 = float(centerY) + fdiv(k0.y * float(zoom), k0.z);
+  precise float x1 = float(centerX) + fdiv(k1.x * float(zoom), k1.z);
+  precise float y1 = float(centerY) + fdiv(k1.y * float(zoom), k1.z);
+  precise float x2 = float(centerX) + fdiv(k2.x * float(zoom), k2.z);
+  precise float y2 = float(centerY) + fdiv(k2.y * float(zoom), k2.z);
+  precise float facing = (x0 - x1) * (y2 - y1) - (y0 - y1) * (x2 - x1);
+  return !(facing <= 0.0);
+}
 
 // Calculate adjusted priority for a face with a given priority, distance, and
 // model global min10 and face distance averages. This allows positioning faces
@@ -131,7 +156,7 @@ void load_face(uint localId, modelinfo minfo, out vert o1, out vert o2, out vert
 }
 
 // what the sort keeps of a face through its barriers: its priority, its distance, and whether it faces the camera
-// (face_visible, for the priorities' averages)
+// (cpu_facing, for the priorities' averages)
 void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool visible) {
   vert a, b, c;
   load_face(localId, minfo, a, b, c);
@@ -152,13 +177,17 @@ void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool
       // the client takes from the same matrix, (int) of its z (CpuLookPlugin's boat upload puts it in y)
       dis = cpu_tdiv((int(a.pos.z) - minfo.y) + (int(b.pos.z) - minfo.y) + (int(c.pos.z) - minfo.y), 3);
       if (painter) {
-        visible = face_visible_cam(a.pos, b.pos, c.pos);
+        visible = cpu_facing(a.pos, b.pos, c.pos);
       }
+    } else if (painter) {
+      // render mode 2: the corners turned once, for the depth and the facing both
+      ivec3 pos = ivec3(minfo.x, minfo.y, minfo.z);
+      vec3 k0 = cpu_turn(cpu_rel(a.pos, pos)), k1 = cpu_turn(cpu_rel(b.pos, pos)), k2 = cpu_turn(cpu_rel(c.pos, pos));
+      int o = cpu_origin(pos);
+      dis = cpu_tdiv((int(k0.z) - o) + (int(k1.z) - o) + (int(k2.z) - o), 3);
+      visible = cpu_facing(k0, k1, k2);
     } else {
       dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
-      if (painter) {
-        visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
-      }
     }
   } else {
     prio = 0;
@@ -184,9 +213,14 @@ void add_priority_run(int p, int n, int d, int lowest) {
 // A face's adjusted priority: its priority, and for 10 and 11 where it falls among the averages of 0/2, 3/4 and 6/8
 int adjusted_priority(uint localId, modelinfo minfo, int thisPriority, int thisDistance) {
   if (localId < minfo.size) {
-    int avg1 = -6000;
-    int avg2 = -6000;
-    int avg3 = -6000;
+    // a pair of priorities with no faces: the client's average is 0 in its buckets (a face's depth plus the model's
+    // depth offset, Model.getRadius, which the plugin puts in bits 11 to 21: CpuLookPlugin.painterFlags), so here, in
+    // depths without the offset, minus the offset (11/19/2026; it was -6000, the GPU plugin's, which differs only for a
+    // face in the very first bucket)
+    int none = -((minfo.flags >> 11) & 2047);
+    int avg1 = none;
+    int avg2 = none;
+    int avg3 = none;
 
     if (totalNum[1] > 0 || totalNum[2] > 0) {
       avg1 = cpu_fdiv(totalDistance[1] + totalDistance[2], totalNum[1] + totalNum[2]);

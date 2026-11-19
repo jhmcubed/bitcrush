@@ -41,14 +41,24 @@ int cpu_fdiv(int a, int b) {
   return q * b > a ? q - 1 : q;
 }
 
+// a corner relative to the camera as the client's model draw adds the model's place (floats, the place's ints)
+vec3 cpu_rel(vec3 v, ivec3 pos) {
+  precise vec3 rel = vec3(v.x + float(pos.x - cameraPos.x), v.y + float(pos.y - cameraPos.y), v.z + float(pos.z - cameraPos.z));
+  return rel;
+}
+
 // a corner's depth: (int) of its float camera z (the corner already turned for the object's orientation)
 int cpu_depth(vec4 v, ivec3 pos) {
-  precise vec3 rel = vec3(v.x + float(pos.x - cameraPos.x), v.y + float(pos.y - cameraPos.y), v.z + float(pos.z - cameraPos.z));
-  return int(cpu_turn(rel).z);
+  return int(cpu_turn(cpu_rel(v.xyz, pos)).z);
+}
+
+// the model centre's own depth, in ints (bo's var18)
+int cpu_origin(ivec3 pos) {
+  int x0 = pos.x - cameraPos.x, y0 = pos.y - cameraPos.y, z0 = pos.z - cameraPos.z;
+  return (y0 * cameraRot.z + ((z0 * cameraRot.y - x0 * cameraRot.x) >> 16) * cameraRot.w) >> 16;
 }
 
 int cpu_face_distance(vec4 vA, vec4 vB, vec4 vC, ivec3 pos) {
-  int x0 = pos.x - cameraPos.x, y0 = pos.y - cameraPos.y, z0 = pos.z - cameraPos.z;
-  int c = (y0 * cameraRot.z + ((z0 * cameraRot.y - x0 * cameraRot.x) >> 16) * cameraRot.w) >> 16;
+  int c = cpu_origin(pos);
   return cpu_tdiv((cpu_depth(vA, pos) - c) + (cpu_depth(vB, pos) - c) + (cpu_depth(vC, pos) - c), 3);
 }

@@ -453,7 +453,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int framePlane;
 	// the developer build's count of why zone mode left tiles out (level, hidden roof, frustum, in view), logged every
 	// five seconds with Log frame timings on
-	private final int[] zoneWhy = new int[4];
+	private final int[] zoneWhy = new int[5];
 	private boolean zoneWhyNext;
 	private long lastZoneWhyLog;
 	private volatile boolean zoneFrame;
@@ -1425,13 +1425,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final boolean all = !anyVisible;
 		final int now = frameStamp;
 		// the tiles the client drew: those its frustum test passed (tileInFrustum), at a level no higher than the one
-		// shown (drawScene's plane; with roof removal on, every level, as the client has it); a tile's level is its plane,
-		// or 0 when its settings say it's seen from below (8; the client's own rule, read 11/19/2026)
+		// shown (drawScene's plane; with roof removal on, every level, as the client has it); a tile's level is the
+		// client's own rule (drawLevel)
 		final byte[][][] settings = scene.getExtendedTileSettings();
 		final int shown = framePlane;
 		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
 		final CpuOrder.Visible visible = (p, x, y) -> (all || visibleStamp[p][x][y] == now)
-			&& (roofRemoval || settings == null || ((settings[p][x][y] & 8) != 0 ? 0 : p) <= shown);
+			&& (roofRemoval || drawLevel(settings, p, x, y) <= shown);
 		final int camX = (int) cameraX, camZ = (int) cameraZ, distance = getDrawDistance();
 		final long orderStart = timing ? System.nanoTime() : 0;
 		fastOrder.build(scene, camX, camZ, distance, visible);
@@ -3030,9 +3030,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				return false;
 			}
-			// its level: its plane, or 0 when its settings say it's seen from below (8): the client's own rule
-			int rl = settings != null && (settings[p][x][y] & 8) != 0 ? 0 : p;
-			if (rl > maxLevel)
+			// its level by the client's own rule; above the highest level drawn it's left out, unless roof removal is on
+			// (the client's walk, ei.iv, then leaves out only hidden roofs' tiles)
+			int rl = drawLevel(settings, p, x, y);
+			if (count && settings != null && rl != ((settings[p][x][y] & 8) != 0 ? 0 : p))
+			{
+				why[4]++;  // a tile under a bridge, whose level the 11/19/2026 reading changed
+			}
+			if (rl > maxLevel && !roofRemoval)
 			{
 				if (count)
 				{
@@ -3085,9 +3090,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			zoneWhyNext = false;
 			lastZoneWhyLog = System.nanoTime();
-			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}",
+			log.info("Bitcrush zone mode's tiles: levels from the client: lowest {}, the player's {}, highest drawn {}; roof removal mode {}, roofs hidden {}; the old mode's level shown would be {}; tiles tested {}: left out by their level {}, by a hidden roof {}, by the frustum {}, in view {}; tiles under a bridge given another level by the settings read before bridges {}",
 				scene.getMinLevel(), level, maxLevel, scene.getRoofRemovalMode(), hide, framePlane,
-				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3]);
+				why[0] + why[1] + why[2] + why[3], why[0], why[1], why[2], why[3], why[4]);
 		}
 		if (reference)
 		{
@@ -4117,6 +4122,23 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			GL43C.glBufferData(target, newSize, usage);
 			recreateCLBuffer(glBuffer, clFlags);
 		}
+	}
+
+	/**
+	 * A tile's level for which tiles the client draws (ei.dm, read 11/19/2026): its plane, or 0 when its settings say
+	 * it's seen from below (8). The client marks that at load from the settings at the tile's own level, before
+	 * bridges move each tile above one down a level (the loader sets the mark, then moves them), so under a bridge
+	 * (level 1's settings 2) a tile's settings are read one level up from where it now sits (11/19/2026: zone mode drew
+	 * part of the Grand Exchange's upper level that the CPU leaves out). The scene's edge tiles are never marked.
+	 */
+	static int drawLevel(byte[][][] settings, int p, int x, int y)
+	{
+		if (settings == null || x <= 0 || y <= 0 || x >= settings[0].length - 1 || y >= settings[0][0].length - 1)
+		{
+			return p;
+		}
+		final int at = (settings[1][x][y] & 2) != 0 ? (p + 1) & 3 : p;
+		return (settings[at][x][y] & 8) != 0 ? 0 : p;
 	}
 
 	private static int nextPowerOfTwo(int v)

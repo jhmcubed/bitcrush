@@ -628,7 +628,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				// its ways), as it does for the CPU, instead of handing it over straight for the compute pass to bend
 				zoneMode = Build.DEVELOPER && config.zoneMode() && computeMode == ComputeMode.OPENGL;
 				// the client's own zone-mode work (its picking) over render threads, as RuneLite's GPU plugin has it
-				zoneThreads = Math.max(0, Math.min(Runtime.getRuntime().availableProcessors() - 1, config.zoneThreads()));
+				// (the common pool's parallelism: the processor's cores less one)
+				zoneThreads = Math.max(0, Math.min(java.util.concurrent.ForkJoinPool.getCommonPoolParallelism(), config.zoneThreads()));
 				client.setGpuFlags(gpuFlags());
 				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 

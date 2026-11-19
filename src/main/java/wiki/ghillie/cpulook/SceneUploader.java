@@ -1128,6 +1128,12 @@ class SceneUploader
 		{
 			return 255;
 		}
+		// a face's transparency of 255 is drawn at 253, nearly invisible but not quite (the client's face draw, fo.pa,
+		// 1.13.7: "cu[face] == -1 ? 253 : cu[face]"; 11/19/2026); only a whole model's -1 draws nothing
+		if (faceTransparency == 255)
+		{
+			faceTransparency = 253;
+		}
 		int t = modelTransparency & 255;
 		if (t > 0 && faceTransparency < 253)
 		{

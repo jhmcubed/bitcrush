@@ -134,6 +134,17 @@ void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool
     prio = (a.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
     dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
     visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
+    // The CPU's order of a model's faces (its model draw, fo.java 1.13.7, read 11/19/2026 for the ToA fire's core): only
+    // render mode 2 models (players, most NPCs: the painter mark, bit 29) are drawn with their faces' priorities (ei(true),
+    // bt). Every other model's solid faces go in their own order, by index (the solid pass, mode 3, bq), and its
+    // see-through faces by depth alone, the farthest first, at the same depth the lower index first (the see-through
+    // pass, mode 1, ei(false)): one stretch, the solid faces first (each list keeps only its own faces' order)
+    if (((minfo.flags >> 29) & 1) == 0) {
+      prio = 0;
+      if (((a.ahsl >> 24) & 0xff) == 0) {
+        dis = 32767;
+      }
+    }
   } else {
     prio = 0;
     dis = 0;

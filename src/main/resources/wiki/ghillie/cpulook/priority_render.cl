@@ -156,6 +156,14 @@ void get_face(__local struct shared_data *shared, __global const struct vert *vb
     // calculate distance to face
     int thisPriority = (thisA.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
     int thisDistance = cpu_face_distance(uni, thisrvA, thisrvB, thisrvC, (int4)(minfo.x, minfo.y, minfo.z, 0));
+    // the CPU's order of a model's faces (priority_render.glsl's face_key says how): priorities for render mode 2
+    // models only; every other model's solid faces by index, its see-through faces by depth alone
+    if (((flags >> 29) & 1) == 0) {
+      thisPriority = 0;
+      if (((thisA.ahsl >> 24) & 0xff) == 0) {
+        thisDistance = 32767;
+      }
+    }
 
     *o1 = (struct vert){thisrvA.x, thisrvA.y, thisrvA.z, thisA.ahsl};
     *o2 = (struct vert){thisrvB.x, thisrvB.y, thisrvB.z, thisB.ahsl};

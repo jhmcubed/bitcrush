@@ -123,6 +123,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// pass) and the models the ground never hides (players, NPCs, items, projectiles; marked 0x800000)
 	private static final int FLAG_GROUND = 1 << 27;
 	private static final int FLAG_FREE = 1 << 28;
+	// render mode 2, "sorted, no depth" (players and most NPCs): its corners marked 0x200000 by the compute pass, its solid
+	// faces drawn a model at a time as the CPU draws them (geom.glsl's painterPass)
+	private static final int FLAG_PAINTER = 1 << 29;
+	private static final int MARK_PAINTER = 0x200000;
 	private static final int MARK_GROUND = 0x400000;
 	private static final int MARK_FREE = 0x800000;
 	// a ground tile, always (the CPU textures tiles with its own routine; the compute pass marks them itself)
@@ -391,6 +395,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int[] seeFirst = new int[256], seeCount = new int[256];
 	private int seeRanges;
 	private boolean drawnSeeThrough;
+	// the stretches of this frame's triangles that belong to render mode 2 models (players, most NPCs), one a model, never
+	// joined: the CPU draws each such model's solid faces with colour only, tested against the depth from before it (so a
+	// later face covers an earlier one nearer the camera: the trousers over the boots), then writes its keys
+	// (claude/cpu-look.md, section 9, "Players and NPCs: render mode 2")
+	private int[] painterFirst = new int[64], painterCount = new int[64];
+	private int painterRanges;
+	private boolean drawnPainter;
+	private int uniPainterPass;
 	// the hide switches (diagnostics), read once a frame: RuneLite's config proxy is slow to read for every one of the
 	// tens of thousands of objects a frame hands over (11/18/2026)
 	// the client's zoom and clip edges for isVisible, read at its first object each frame (they don't change mid-frame)
@@ -847,6 +859,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		uniCpuFlags = GL43C.glGetUniformLocation(glProgram, "cpuFlags");
 		uniGroundPass = GL43C.glGetUniformLocation(glProgram, "groundPass");
 		uniAlphaPass = GL43C.glGetUniformLocation(glProgram, "alphaPass");
+		uniPainterPass = GL43C.glGetUniformLocation(glProgram, "painterPass");
 		uniGroundAllowance = GL43C.glGetUniformLocation(glProgram, "groundAllowance");
 		uniPalette = GL43C.glGetUniformLocation(glProgram, "palette");
 		uniTick = GL43C.glGetUniformLocation(glProgram, "tick");
@@ -1575,6 +1588,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			timer.sceneStart();
 		}
 		seeRanges = 0;
+		painterRanges = 0;
 		clipRead = false;
 
 		// The camera as the CPU renderer has it (claude/cpu-look.md, "Read from today's client", question 5): the
@@ -2268,7 +2282,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				// solid face first, testing and writing the key; then the see-through ones in the game's order, tested
 				// against it but never writing it
 				GL43C.glUniform1i(uniAlphaPass, 1);
+				final boolean painters = painterRanges > 0 && !orderTest;
+				GL43C.glUniform1i(uniPainterPass, painters ? 1 : 0);
 				GL43C.glDrawArrays(GL43C.GL_TRIANGLES, 0, targetBufferOffset);
+				if (painters)
+				{
+					drawPainters();
+				}
 				if (timing)
 				{
 					timer.mark(FrameTimer.AFTER_SOLID);
@@ -2792,15 +2812,54 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final long t0 = timing ? System.nanoTime() : 0;
 		final int before = targetBufferOffset;
 		drawnSeeThrough = false;
+		drawnPainter = false;
 		drawRenderable(projection, scene, renderable, orientation, x, y, z, hash);
 		if (drawnSeeThrough && targetBufferOffset > before)
 		{
 			seeRange(before, targetBufferOffset - before);
 		}
+		if (drawnPainter && targetBufferOffset > before)
+		{
+			painterRange(before, targetBufferOffset - before);
+		}
 		if (timing)
 		{
 			timer.callback(t0);
 		}
+	}
+
+	// Render mode 2 models, as the CPU draws them (its Model.draw with mode 2: the sorted faces with colour on and key
+	// writes off, then again with colour off and key writes on): each model's solid faces tested against the depth from
+	// before it, a later face covering an earlier one, then its depth written. Drawn after the other solid faces; the CPU
+	// draws them in the game's order (the same pixels but where something drawn after the model in the CPU's first pass
+	// cuts through it between its faces' depths). The geometry program, its uniforms set; the depth test on (greater).
+	private void drawPainters()
+	{
+		GL43C.glUniform1i(uniAlphaPass, 1);
+		GL43C.glUniform1i(uniPainterPass, 2);
+		for (int i = 0; i < painterRanges; i++)
+		{
+			GL43C.glDepthMask(false);
+			GL43C.glDrawArrays(GL43C.GL_TRIANGLES, painterFirst[i], painterCount[i]);
+			GL43C.glColorMask(false, false, false, false);
+			GL43C.glDepthMask(true);
+			GL43C.glDrawArrays(GL43C.GL_TRIANGLES, painterFirst[i], painterCount[i]);
+			GL43C.glColorMask(true, true, true, true);
+		}
+		GL43C.glUniform1i(uniPainterPass, 0);
+	}
+
+	// a render mode 2 model's stretch of triangles (never joined to the last: each is drawn on its own)
+	private void painterRange(int first, int count)
+	{
+		if (painterRanges == painterFirst.length)
+		{
+			painterFirst = Arrays.copyOf(painterFirst, painterRanges * 2);
+			painterCount = Arrays.copyOf(painterCount, painterRanges * 2);
+		}
+		painterFirst[painterRanges] = first;
+		painterCount[painterRanges] = count;
+		painterRanges++;
 	}
 
 	// a stretch of see-through faces' model, for the depth test's second pass (joined to the last when they touch)
@@ -2848,6 +2907,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			offsetModel = model;
 		}
 		drawnSeeThrough = model.getFaceTransparencies() != null || model.getTransparency() != 0;
+		// render mode 2 (players, most NPCs: the client's own rule, through RuneLite's Renderable.getRenderMode)
+		final boolean painter = renderable.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		drawnPainter = painter;
 
 		if (computeMode == ComputeMode.NONE)
 		{
@@ -2882,6 +2944,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				vertexBuffer, uvBuffer);
 			int m = markOf(scene, renderable, x, z, hash);
 			mark(start, m, m != 0);
+			mark(start, MARK_PAINTER, painter);
 			noteDraw(renderable, x, z, null, -1, targetBufferOffset - start, start);
 		}
 		// Model may be in the scene buffer
@@ -2922,7 +2985,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
 			buffer.put(FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | orientation
-				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0));
+				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0));
 			buffer.put(x).put(y).put(z);
 
 			targetBufferOffset += tc * 3;
@@ -2970,7 +3033,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(len / 3);
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
-			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0));
+			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0));
 			buffer.put(x).put(y).put(z);
 			noteDraw(renderable, x, z, b, pos, len, -1);
 
@@ -3129,6 +3192,17 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glBindBuffer(GL43C.GL_DRAW_INDIRECT_BUFFER, recCommands.glBufferId);
 		GL43C.glUniform1i(uniRecListB, 0);
 		GL43C.glDrawArraysIndirect(GL43C.GL_TRIANGLES, 0L);
+		if (keyTest && painterRanges > 0)
+		{
+			// render mode 2 models: their solid faces aren't in the solid list (setup_records.glsl); the geometry stage
+			// draws them, a model at a time, the same pixels as the records would
+			GL43C.glUseProgram(glProgram);
+			GL43C.glBindVertexArray(vaoCompute);
+			drawPainters();
+			GL43C.glUniform1i(uniAlphaPass, 0);
+			GL43C.glUseProgram(glRecordProgram);
+			GL43C.glBindVertexArray(vaoRecords);
+		}
 		if (timing)
 		{
 			timer.mark(FrameTimer.AFTER_SOLID);

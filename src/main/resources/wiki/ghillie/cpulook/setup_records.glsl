@@ -127,6 +127,11 @@ void main() {
   }
   int n = faceSetup(i, false, alpha, r0, r1);
   bool listB = twoLists == 1 && alpha > 0;
+  // a render mode 2 model's solid faces (0x200000: players, most NPCs) are drawn by the geometry stage, a model at a
+  // time, after the solid list (geom.glsl's painterPass says how); their see-through faces stay in list B
+  if (twoLists == 1 && alpha == 0 && (vin[i * 3].ahsl & 0x200000) != 0) {
+    n = 0;
+  }
   counts[i] = listB ? uvec2(0u, uint(n)) : uvec2(uint(n), 0u);
 #else
   // a record (only those that fit: the scan cut the lists there and flagged it, and the plugin grows the buffer)

@@ -79,6 +79,12 @@ flat out vec4 fDepth;  // 1/z as a plane over the screen, for the depth-buffer d
 uniform int cpuFlags;  // 1 bricks, 2 bands, 4 texture spans, 8 depth buffer, 16 plain triangles (diagnostics), 32 the CPU's depth key
 uniform int groundPass;  // "the ground hides what's under it" (the old stopgap): 1 the ground alone, into the depth buffer; 2 everything
 uniform int alphaPass;   // with the CPU's depth test: 1 solid faces only (tested, writing the key), 2 see-through faces only (tested, not writing); 0 both
+// Render mode 2, "sorted, no depth" (players and most NPCs; claude/cpu-look.md, section 9, "Players and NPCs: render
+// mode 2"): the CPU draws such a model's solid faces in its sorted order tested against the depth from before the
+// model, writing colour but no key, then again writing only its keys, so a later face covers an earlier one nearer the
+// camera (the trousers over the boots). Their corners carry 0x200000. In the solid pass: 0 every solid face; 1 all but
+// those (the plugin's main pass); 2 only those (one model at a time, twice: colour without depth writes, then depth)
+uniform int painterPass;
 
 #include "setup.glsl"
 
@@ -115,6 +121,7 @@ void main() {
   // box round a bloodwood tree's bucket, partly see-through, hid the bucket and the trunk's foot whenever it came
   // first in the order, where the CPU draws them): solid faces in one pass, then see-through ones over them
   if ((alphaPass == 1 && alpha > 0) || (alphaPass == 2 && alpha == 0)) return;
+  if (alphaPass == 1 && painterPass != 0 && ((gAhsl[0] & 0x200000) != 0) != (painterPass == 2)) return;
   vec3 v[3] = vec3[3](gVertex[0], gVertex[1], gVertex[2]);
   int a[3] = int[3](gAhsl[0], gAhsl[1], gAhsl[2]);
   vec3 tp[3] = vec3[3](gTexPos[0], gTexPos[1], gTexPos[2]);

@@ -306,7 +306,8 @@ void sort_and_insert(__local struct shared_data *shared, __constant struct unifo
 
     // the CPU look, for "the ground hides what's under it": grass and other ground decorations marked as the ground
     // (bit 22), players, NPCs, items and projectiles as never hidden (bit 23)
-    int mark = ((flags & (1 << 28)) != 0 ? 0x800000 : 0) | ((flags & (1 << 27)) != 0 ? 0x400000 : 0);
+    int mark = ((flags & (1 << 28)) != 0 ? 0x800000 : 0) | ((flags & (1 << 27)) != 0 ? 0x400000 : 0)
+      | ((flags & (1 << 29)) != 0 ? 0x200000 : 0);  // render mode 2 (geom.glsl's painterPass)
     // (the face's bias rides on in its texture slot, uv.x's bits 9-16: SceneUploader.pushModel)
     thisrvA.ahsl &= ~0xff0000;
     thisrvB.ahsl &= ~0xff0000;

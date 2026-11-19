@@ -264,15 +264,15 @@ public interface CpuLookConfig extends Config
 
 	@ConfigItem(
 		keyName = "zoneMode",
-		name = "Zone mode (stage B)",
-		description = "Stage B (claude/cpu-look-stage-b.md): the client in its zone mode, which hands a renderer only what moves, and CPU Look drawing the scene from its own walk, in the CPU's order. Turn the plugin off and on after changing it. With compute shaders on only.",
+		name = "Zone mode",
+		description = "The normal path (since 11/19/2026; claude/cpu-look-stage-b.md): the client in its zone mode, which hands a renderer only what moves, and CPU Look drawing the scene from its own walk, in the CPU's order. Off: the old path (the client's old callbacks, in its order), to compare. Turn the plugin off and on after changing it. With compute shaders on OpenGL only; the Hub's build always uses it there.",
 		position = 44,
 		section = diagnostics,
 		hidden = !Build.DEVELOPER
 	)
 	default boolean zoneMode()
 	{
-		return false;
+		return true;
 	}
 
 	@Range(min = 0, max = 15)

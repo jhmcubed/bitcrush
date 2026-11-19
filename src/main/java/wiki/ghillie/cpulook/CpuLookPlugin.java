@@ -658,7 +658,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				client.setDrawCallbacks(this);
 				// no HILLSKEW: the client bends scenery to its slope itself (the game's contourGround, every one of
 				// its ways), as it does for the CPU, instead of handing it over straight for the compute pass to bend
-				zoneMode = Build.DEVELOPER && config.zoneMode() && computeMode == ComputeMode.OPENGL;
+				// zone mode, the normal path since 11/19/2026 (claude/cpu-look-stage-b.md): wherever the compute shaders run
+				// on OpenGL; the old path (the client's old callbacks, in its order) on the Mac's OpenCL and with compute
+				// off, and in the developer build when Zone mode is switched off, to compare
+				zoneMode = (!Build.DEVELOPER || config.zoneMode()) && computeMode == ComputeMode.OPENGL;
 				// the client's own zone-mode work (its picking) over render threads, as RuneLite's GPU plugin has it
 				// (the common pool's parallelism: the processor's cores less one)
 				zoneThreads = Math.max(0, Math.min(java.util.concurrent.ForkJoinPool.getCommonPoolParallelism(), config.zoneThreads()));

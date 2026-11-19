@@ -449,6 +449,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// postSceneDraw. Set when the plugin starts (the client's flag).
 	private boolean zoneMode;
 	private int zoneThreads;
+	// drawScene's plane: the highest render level the client draws this frame
+	private int framePlane;
 	private volatile boolean zoneFrame;
 	// drawDynamic comes from the client's render threads, drawTemp from its own thread beside them: their copying one
 	// at a time
@@ -1415,7 +1417,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		final boolean all = !anyVisible;
 		final int now = frameStamp;
-		final CpuOrder.Visible visible = (p, x, y) -> all || visibleStamp[p][x][y] == now;
+		// the tiles the client drew: those its frustum test passed (tileInFrustum), at a level no higher than the one
+		// shown (drawScene's plane; with roof removal on, every level, as the client has it); a tile's level is its plane,
+		// or 0 when its settings say it's seen from below (8; the client's own rule, read 11/19/2026)
+		final byte[][][] settings = scene.getExtendedTileSettings();
+		final int shown = framePlane;
+		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
+		final CpuOrder.Visible visible = (p, x, y) -> (all || visibleStamp[p][x][y] == now)
+			&& (roofRemoval || settings == null || ((settings[p][x][y] & 8) != 0 ? 0 : p) <= shown);
 		final int camX = (int) cameraX, camZ = (int) cameraZ, distance = getDrawDistance();
 		final long orderStart = timing ? System.nanoTime() : 0;
 		fastOrder.build(scene, camX, camZ, distance, visible);
@@ -1678,6 +1687,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawScene(double cameraX, double cameraY, double cameraZ, double cameraPitch, double cameraYaw, int plane)
 	{
+		framePlane = plane;
 		final boolean timings = config.logTimings();
 		if (timing && !timings)
 		{
@@ -2987,6 +2997,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 		final int[][][] roofs = scene.getRoofs();
+		final byte[][][] settings = scene.getExtendedTileSettings();
 		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
 		final int level = zoneLevel, maxLevel = zoneMaxLevel;
 		final java.util.Set<Integer> hide = zoneHideRoofs;
@@ -3001,7 +3012,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				return false;
 			}
-			int rl = t.getRenderLevel();
+			// its level: its plane, or 0 when its settings say it's seen from below (8): the client's own rule
+			int rl = settings != null && (settings[p][x][y] & 8) != 0 ? 0 : p;
 			if (rl > maxLevel)
 			{
 				return false;
@@ -3484,7 +3496,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			clientKinds.merge(what, 1, Integer::sum);
 			if (exClient == null)
 			{
-				exClient = String.format("%s turned %d at %d %d %d, hash %x", what, callO[i], callX[i], callY[i], callZ[i], callH[i]);
+				int tx = (callX[i] >> 7) + SCENE_OFFSET, ty = (callZ[i] >> 7) + SCENE_OFFSET, tp = (int) ((callH[i] >> TileObject.HASH_PLANE_SHIFT) & 3);
+				exClient = String.format("%s turned %d at %d %d %d, hash %x (tile %d %d plane %d, %s)", what, callO[i], callX[i], callY[i],
+					callZ[i], callH[i], tx, ty, tp, tx >= 0 && ty >= 0 && tx < Constants.EXTENDED_SCENE_SIZE && ty < Constants.EXTENDED_SCENE_SIZE
+						&& visibleStamp[tp][tx][ty] == frameStamp ? "in view" : "not in view by tileInFrustum");
 			}
 		}
 		for (int k = 0; k < n; k++)
@@ -3497,7 +3512,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				if (exWalk == null)
 				{
 					fo.draw(k, p);
-					exWalk = String.format("%s turned %d at %d %d %d, hash %x", what, p[0], p[1], p[2], p[3], hashes[k]);
+					Object src = fo.ksrc[k];
+					String where = "";
+					if (src instanceof TileObject)
+					{
+						TileObject t = (TileObject) src;
+						where = String.format(" (plane %d, level shown %d)", t.getPlane(), framePlane);
+					}
+					exWalk = String.format("%s turned %d at %d %d %d, hash %x%s", what, p[0], p[1], p[2], p[3], hashes[k], where);
 				}
 			}
 		}

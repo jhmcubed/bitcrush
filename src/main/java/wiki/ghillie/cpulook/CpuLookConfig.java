@@ -171,13 +171,25 @@ public interface CpuLookConfig extends Config
 	@ConfigItem(
 		keyName = "solidTextures",
 		name = "Solid textures",
-		description = "Draws a texel of 0 black in the textures the game marks solid, as the CPU renderer does; the others leave a hole there. Off: every texel of 0 is a hole, as RuneLite's GPU plugin has it. The flag is found by reflection on the game's texture provider (RuneLite's log says what it found).",
+		description = "Draws a texel of 0 black in the textures the game marks solid, as the CPU renderer does; the others leave a hole there. Off: every texel of 0 is a hole, as RuneLite's GPU plugin has it. Which textures are solid comes from a list read from the game.",
 		position = 5,
 		section = cpuLook
 	)
 	default boolean solidTextures()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "playersByDepth",
+		name = "Players by depth",
+		description = "Not the CPU's look, off by default. The CPU draws a player's own faces (and most NPCs') in the game's sorted order, a later face covering an earlier one even where the earlier is nearer: trousers cover boots that poke through them, but some items worn on the back cover part of the torso, in the CPU renderer and RuneLite's GPU plugins alike. On: the nearer face wins inside the model too, so the torso stays whole and boots can poke through trousers again.",
+		position = 6,
+		section = cpuLook
+	)
+	default boolean playersByDepth()
+	{
+		return false;
 	}
 
 	@ConfigItem(
@@ -226,6 +238,19 @@ public interface CpuLookConfig extends Config
 		hidden = !Build.DEVELOPER
 	)
 	default boolean logDrawOrder()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "logPlayerModel",
+		name = "Log my player's model",
+		description = "Writes your player's model as the game hands it over (its corners, faces, colours, priorities and the camera) to RuneLite's log, once, as one line starting \"Bitcrush player model:\". For working out how render mode 2 could keep trousers over boots without an item on the back covering the torso. Turn it off and on again for another.",
+		position = 34,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean logPlayerModel()
 	{
 		return false;
 	}

@@ -381,6 +381,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private boolean orderWarned;
 	// this frame's switches, read once in drawScene
 	private boolean groundHides;
+	// The CPU look's "Players by depth" (off: render mode 2 models drawn as the CPU draws them), read once a frame
+	private boolean painterModels;
 	private boolean orderTest;
 	private Scene frameScene;
 	// the camera in whole units, this frame
@@ -416,8 +418,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// the draw-order diagnostic
 	private final DrawOrderLog drawOrderLog = new DrawOrderLog();
 	private volatile boolean logDrawOrderNext;
+	// the developer build's "Log my player's model": the local player's next draw dumped to the log (ModelDump)
+	private volatile boolean logPlayerModelNext;
 
 	private double cameraX, cameraY, cameraZ;
+	// the frame's camera turn in 16,384ths, as the uniforms carry it (the developer build's model dump)
+	private int cameraYawUnits, cameraPitchUnits;
 	private double cameraYaw, cameraPitch;
 
 	private int viewportOffsetX;
@@ -728,6 +734,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			else if (configChanged.getKey().equals("logDrawOrder"))
 			{
 				logDrawOrderNext = Build.DEVELOPER && config.logDrawOrder();
+			}
+			else if (configChanged.getKey().equals("logPlayerModel"))
+			{
+				logPlayerModelNext = Build.DEVELOPER && config.logPlayerModel();
 			}
 			else if (configChanged.getKey().equals("removeVertexSnapping"))
 			{
@@ -1641,11 +1651,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			worldViewLog.frame(client, camX, camY, camZ, yaw, pitch);
 		}
 		this.cameraX = camX;
+		this.cameraYawUnits = yaw;
+		this.cameraPitchUnits = pitch;
 		this.cameraY = camY;
 		this.cameraZ = camZ;
 		draws = 0;
 		// (the developer's diagnostics: never on in the Plugin Hub's build, Build.java)
 		groundHides = Build.DEVELOPER && config.groundHides() && !config.depthBuffer() && !config.cpuDepthTest();
+		painterModels = !config.playersByDepth();
 		orderTest = Build.DEVELOPER && config.cpuOrderTest();
 		frameScene = client.getTopLevelWorldView().getScene();
 		this.cameraPitch = pitch * Perspective.UNIT14;
@@ -2907,8 +2920,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			offsetModel = model;
 		}
 		drawnSeeThrough = model.getFaceTransparencies() != null || model.getTransparency() != 0;
+		if (Build.DEVELOPER && logPlayerModelNext && renderable == client.getLocalPlayer())
+		{
+			logPlayerModelNext = false;
+			log.info("Bitcrush player model: {}", ModelDump.dump(model, renderable.getRenderMode(), orientation, x, y, z,
+				(int) cameraX, (int) cameraY, (int) cameraZ, cameraYawUnits, cameraPitchUnits, client.getScale(), client.getCenterX(),
+				client.getCenterY(), client.getViewportWidth(), client.getViewportHeight()));
+		}
 		// render mode 2 (players, most NPCs: the client's own rule, through RuneLite's Renderable.getRenderMode)
-		final boolean painter = renderable.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		final boolean painter = painterModels && renderable.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		drawnPainter = painter;
 
 		if (computeMode == ComputeMode.NONE)

@@ -985,6 +985,24 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			openCLManager.init(awtContext);
 		}
 
+		if (Build.DEVELOPER && computeMode == ComputeMode.OPENGL)
+		{
+			nameProgram(glProgram, "geometry stage");
+			nameProgram(glUiProgram, "interface");
+			nameProgram(glComputeProgram, "compute 1024 x 6");
+			nameProgram(glSmallComputeProgram, "compute 512");
+			nameProgram(glTinyComputeProgram, "compute 64");
+			nameProgram(glMidComputeProgram, "compute 256");
+			for (int i = 0; i < BIG_TIERS.length; i++)
+			{
+				nameProgram(glBigComputePrograms[i], "compute " + BIG_TIERS[i][0] + " x " + BIG_TIERS[i][1]);
+			}
+			nameProgram(glUnorderedComputeProgram, "compute unordered");
+			nameProgram(glSetupProgram, "records count");
+			nameProgram(glSetupWriteProgram, "records write");
+			nameProgram(glScanProgram, "records place");
+			nameProgram(glRecordProgram, "records draw");
+		}
 		initUniforms();
 	}
 
@@ -1926,6 +1944,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	private void postDrawScene0()
 	{
+		// (debug groups are OpenGL 4.3's, as the compute pass is: not on the Mac's OpenCL path)
+		passNames = Build.DEVELOPER && config.passNames() && computeMode == ComputeMode.OPENGL;
 		if (drawOrderLog.recording())
 		{
 			drawOrderLog.finish();
@@ -1989,6 +2009,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		IntBuffer modelBufferUnordered = this.modelBufferUnordered.getBuffer();
 
 		// temp buffers (zone mode's stages at their places in them)
+		pass("uploads");
 		final long ut0 = timing ? System.nanoTime() : 0;
 		final long tempBytes = ((long) vertexBuffer.remaining() + uvBuffer.remaining() + (stagedV + stagedUv) * 4L) * 4;
 		if (stagedV > 0 || stagedUv > 0)
@@ -2097,6 +2118,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// unordered
+		pass("compute, the ground (unordered)");
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 7, sinCosBuffer.glBufferId);
 
 		GL43C.glUseProgram(glUnorderedComputeProgram);
@@ -2116,6 +2138,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// small
+		pass("compute, 512 threads");
 		GL43C.glUseProgram(glSmallComputeProgram);
 
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 0, tmpModelBufferSmall.glBufferId);
@@ -2133,11 +2156,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// tiny and mid: the same program, smaller workgroups for smaller models
+		pass("compute, 64 threads");
 		dispatchTier(glTinyComputeProgram, uniBlockTiny, tmpModelBufferTiny, tinyModels);
 		if (timing)
 		{
 			timer.mark(FrameTimer.TIER_END + 2);
 		}
+		pass("compute, 256 threads");
 		dispatchTier(glMidComputeProgram, uniBlockMid, tmpModelBufferMid, midModels);
 		if (timing)
 		{
@@ -2145,6 +2170,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		for (int i = 0; i < BIG_TIERS.length; i++)
 		{
+			pass("compute, " + BIG_TIERS[i][0] + " x " + BIG_TIERS[i][1]);
 			dispatchTier(glBigComputePrograms[i], uniBlockBig[i], tmpModelBufferBig[i], bigModels[i]);
 			if (timing)
 			{
@@ -2153,6 +2179,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// large
+		pass("compute, 1024 x 6");
 		GL43C.glUseProgram(glComputeProgram);
 
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 0, tmpModelBufferLarge.glBufferId);
@@ -2164,6 +2191,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 6, tmpUvBuffer.glBufferId);
 
 		GL43C.glDispatchCompute(largeModels, 1, 1);
+		passEnd();
 
 		if (timing)
 		{
@@ -2665,7 +2693,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		tempUvOffset = 0;
 
 		// Texture on UI
+		pass("the interface");
 		drawUi(overlayColor, canvasHeight, canvasWidth);
+		passEnd();
 
 		try
 		{
@@ -5231,6 +5261,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		growBuffer(recCommands, GL43C.GL_SHADER_STORAGE_BUFFER, 48, GL43C.GL_DYNAMIC_DRAW);
 
 		// count each face's triangles, by the setup's decisions alone
+		pass("records: count");
 		GL43C.glUseProgram(glSetupProgram);
 		GL43C.glUniformBlockBinding(glSetupProgram, uniSetupBlock, 0);
 		GL43C.glUniform2i(uniSetupViewSize, viewportWidth, viewportHeight);
@@ -5251,6 +5282,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// their places in their lists, the draw commands and the write's dispatch
+		pass("records: place");
 		GL43C.glUseProgram(glScanProgram);
 		GL43C.glUniform1i(uniScanFaceCount, faces);
 		GL43C.glUniform1i(uniScanBlockCount, blocks);
@@ -5269,6 +5301,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// each record's face
+		pass("records: note their faces");
 		GL43C.glUniform1i(uniScanPhase, 2);
 		GL43C.glDispatchCompute((faces + 1023) / 1024, 1, 1);
 		GL43C.glMemoryBarrier(GL43C.GL_SHADER_STORAGE_BARRIER_BIT);
@@ -5278,6 +5311,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// the records, a thread each (only faces that draw are set up in full)
+		pass("records: write");
 		GL43C.glUseProgram(glSetupWriteProgram);
 		GL43C.glUniformBlockBinding(glSetupWriteProgram, uniSetupWriteBlock, 0);
 		GL43C.glUniform2i(uniSetupWriteViewSize, viewportWidth, viewportHeight);
@@ -5291,6 +5325,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// the boxes: the solid list (or, without the depth test, every face) in the game's order, then the see-through
+		pass("records: solid faces");
 		GL43C.glUseProgram(glRecordProgram);
 		GL43C.glUniformBlockBinding(glRecordProgram, uniRecBlock, 0);
 		GL43C.glUniform2i(uniRecViewSize, viewportWidth, viewportHeight);
@@ -5312,6 +5347,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			// render mode 2 models: their solid faces aren't in the solid list (setup_records.glsl); the geometry stage
 			// draws them, a model at a time, the same pixels as the records would
+			pass("records: players and NPCs (render mode 2)");
 			GL43C.glUseProgram(glProgram);
 			GL43C.glBindVertexArray(vaoCompute);
 			drawPainters();
@@ -5325,10 +5361,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		if (keyTest)
 		{
+			pass("records: see-through faces");
 			GL43C.glDepthMask(false);
 			GL43C.glUniform1i(uniRecListB, 1);
 			GL43C.glDrawArraysIndirect(GL43C.GL_TRIANGLES, 16L);
 		}
+		passEnd();
 		GL43C.glBindBuffer(GL43C.GL_DRAW_INDIRECT_BUFFER, 0);
 	}
 
@@ -5392,6 +5430,42 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					recordWarned = true;
 				}
 			}
+		}
+	}
+
+	// Diagnostics -> Name the card's passes for a profiler: each pass a KHR_debug group (glPushDebugGroup), so a GPU
+	// profiler (Nsight Graphics' GPU Trace) shows the compute tiers, the record path's passes and the rest by name
+	private boolean passNames, passOpen;
+
+	private void pass(String name)
+	{
+		if (!passNames)
+		{
+			return;
+		}
+		if (passOpen)
+		{
+			GL43C.glPopDebugGroup();
+		}
+		GL43C.glPushDebugGroup(GL43C.GL_DEBUG_SOURCE_APPLICATION, 0, "Bitcrush: " + name);
+		passOpen = true;
+	}
+
+	private void passEnd()
+	{
+		if (passOpen)
+		{
+			GL43C.glPopDebugGroup();
+			passOpen = false;
+		}
+	}
+
+	// the programs named too (glObjectLabel), for the profiler's shader rows
+	private void nameProgram(int program, String name)
+	{
+		if (program > 0)
+		{
+			GL43C.glObjectLabel(GL43C.GL_PROGRAM, program, "Bitcrush: " + name);
 		}
 	}
 

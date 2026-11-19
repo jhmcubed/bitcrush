@@ -342,6 +342,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "passNames",
+		name = "Name the card's passes for a profiler",
+		description = "Each of the card's passes (the uploads, every compute tier, the record path's count, place, notes, write and draws, the interface) wrapped in a named debug group, so a GPU profiler such as Nsight Graphics' GPU Trace shows them by name. Off when not profiling.",
+		position = 50,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean passNames()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

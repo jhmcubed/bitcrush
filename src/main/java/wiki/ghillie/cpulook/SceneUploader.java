@@ -467,8 +467,13 @@ class SceneUploader
 		final byte overrideHue = model.getOverrideHue();
 		final byte overrideSat = model.getOverrideSaturation();
 		final byte overrideLum = model.getOverrideLuminance();
+		final byte modelTransparency = model.getTransparency();
 
-		int len = 0;
+		// (11/19/2026: written into plain arrays and put in the buffers in one go, the same numbers as one put at a
+		// time; the copying of the players and NPCs the client hands over was a sixth of its thread)
+		final int[] vs = vertexBuffer.scratch(triangleCount * 12);
+		final float[] us = uv ? uvBuffer.scratch(triangleCount * 12) : null;
+		int vi = 0, ui = 0;
 		for (int face = 0; face < triangleCount; ++face)
 		{
 			int color1 = color1s[face];
@@ -481,18 +486,17 @@ class SceneUploader
 			}
 			else if (color3 == -2)
 			{
-				vertexBuffer.put(0, 0, 0, 0);
-				vertexBuffer.put(0, 0, 0, 0);
-				vertexBuffer.put(0, 0, 0, 0);
-
+				for (int k = 0; k < 12; k++)
+				{
+					vs[vi++] = 0;
+				}
 				if (uv)
 				{
-					uvBuffer.put(0, 0, 0, 0);
-					uvBuffer.put(0, 0, 0, 0);
-					uvBuffer.put(0, 0, 0, 0);
+					for (int k = 0; k < 12; k++)
+					{
+						us[ui++] = 0;
+					}
 				}
-
-				len += 3;
 				continue;
 			}
 
@@ -507,16 +511,26 @@ class SceneUploader
 				}
 			}
 
-			int packAlphaPriority = packAlphaPriority(model.getTransparency(), transparencies, facePriorities, face);
+			int packAlphaPriority = packAlphaPriority(modelTransparency, transparencies, facePriorities, face);
 			final int biasBits = bias(faceBias, face) << 9;
 
 			int triangleA = indices1[face];
 			int triangleB = indices2[face];
 			int triangleC = indices3[face];
 
-			vertexBuffer.put(vertexX[triangleA], vertexY[triangleA], vertexZ[triangleA], packAlphaPriority | color1);
-			vertexBuffer.put(vertexX[triangleB], vertexY[triangleB], vertexZ[triangleB], packAlphaPriority | color2);
-			vertexBuffer.put(vertexX[triangleC], vertexY[triangleC], vertexZ[triangleC], packAlphaPriority | color3);
+			vs[vi] = Float.floatToIntBits(vertexX[triangleA]);
+			vs[vi + 1] = Float.floatToIntBits(vertexY[triangleA]);
+			vs[vi + 2] = Float.floatToIntBits(vertexZ[triangleA]);
+			vs[vi + 3] = packAlphaPriority | color1;
+			vs[vi + 4] = Float.floatToIntBits(vertexX[triangleB]);
+			vs[vi + 5] = Float.floatToIntBits(vertexY[triangleB]);
+			vs[vi + 6] = Float.floatToIntBits(vertexZ[triangleB]);
+			vs[vi + 7] = packAlphaPriority | color2;
+			vs[vi + 8] = Float.floatToIntBits(vertexX[triangleC]);
+			vs[vi + 9] = Float.floatToIntBits(vertexY[triangleC]);
+			vs[vi + 10] = Float.floatToIntBits(vertexZ[triangleC]);
+			vs[vi + 11] = packAlphaPriority | color3;
+			vi += 12;
 
 			if (uv)
 			{
@@ -538,23 +552,46 @@ class SceneUploader
 						texC = triangleC;
 					}
 
-					int texture = (faceTextures[face] + 1) | biasBits;
-					uvBuffer.put(texture, vertexX[texA], vertexY[texA], vertexZ[texA]);
-					uvBuffer.put(texture, vertexX[texB], vertexY[texB], vertexZ[texB]);
-					uvBuffer.put(texture, vertexX[texC], vertexY[texC], vertexZ[texC]);
+					float texture = (faceTextures[face] + 1) | biasBits;
+					us[ui] = texture;
+					us[ui + 1] = vertexX[texA];
+					us[ui + 2] = vertexY[texA];
+					us[ui + 3] = vertexZ[texA];
+					us[ui + 4] = texture;
+					us[ui + 5] = vertexX[texB];
+					us[ui + 6] = vertexY[texB];
+					us[ui + 7] = vertexZ[texB];
+					us[ui + 8] = texture;
+					us[ui + 9] = vertexX[texC];
+					us[ui + 10] = vertexY[texC];
+					us[ui + 11] = vertexZ[texC];
 				}
 				else
 				{
-					uvBuffer.put(biasBits, 0, 0, 0);
-					uvBuffer.put(biasBits, 0, 0, 0);
-					uvBuffer.put(biasBits, 0, 0, 0);
+					float b = biasBits;
+					us[ui] = b;
+					us[ui + 1] = 0;
+					us[ui + 2] = 0;
+					us[ui + 3] = 0;
+					us[ui + 4] = b;
+					us[ui + 5] = 0;
+					us[ui + 6] = 0;
+					us[ui + 7] = 0;
+					us[ui + 8] = b;
+					us[ui + 9] = 0;
+					us[ui + 10] = 0;
+					us[ui + 11] = 0;
 				}
+				ui += 12;
 			}
-
-			len += 3;
+		}
+		vertexBuffer.getBuffer().put(vs, 0, vi);
+		if (uv)
+		{
+			uvBuffer.getBuffer().put(us, 0, ui);
 		}
 
-		return len;
+		return triangleCount * 3;
 	}
 
 	/** Whether a model needs texture slots: textures, or any face's bias (carried in the slot, uv.x's bits 9-16). */

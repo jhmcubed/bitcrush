@@ -3420,6 +3420,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				fastOrder.dropRecords();
 				recsKey = key;
 				nRecs = 0;
+				dropRecData();
 				recsSeen = fastOrder.records;
 			}
 		}
@@ -3482,6 +3483,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			// (the scene read whole in this frame's walk: every record dropped with it, none used yet)
 			nRecs = 0;
+			dropRecData();
 			recsSeen = fastOrder.records;
 		}
 		final long loop0 = timing ? System.nanoTime() : 0, apart0 = timing ? timer.callbacksSoFar() : 0;
@@ -3523,7 +3525,19 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// The same numbers the old path's callbacks put in the draw buffers (drawRenderable's scene-buffer branch,
 	// drawScenePaint0, drawSceneTileModel0), worked out once; RuneLite's hide hooks asked then too, as RuneLite's own
 	// zone renderer asks them when it uploads a zone (SceneUploader.uploadZoneTile).
-	private static final int REC = 12, RB_MODEL = 1, RB_SEE = 2, RB_PAINTER = 4, RB_GROUND = 8, RB_NONE = 16;
+	private static final int REC = 12, RB_MODEL = 1, RB_SEE = 2, RB_PAINTER = 4, RB_GROUND = 8, RB_NONE = 16, RB_PUSHED = 32;
+	// RB_PUSHED (11/19/2026): animated scenery at rest (a DynamicObject the client doesn't hand over, drawn from its
+	// getModelZbuf, which pushModel copied every frame): copied once when prepared, its numbers kept here (recVerts,
+	// recUvs; the record's last int their index) and put in the frame's temporary buffers in one go; recKeys, the
+	// object, for the frames the client hands it over moving (zoneDyn), which then win, as in zoneEntry
+	private int[][] recVerts = new int[256][];
+	private float[][] recUvs = new float[256][];
+	private Object[] recKeys = new Object[256];
+	private int nRecData;
+	private int[] checkVerts;
+	private float[] checkUvs;
+	private final GpuIntBuffer prepVB = new GpuIntBuffer();
+	private final GpuFloatBuffer prepUB = new GpuFloatBuffer();
 	private int[] recs = new int[REC * 16384];
 	private int nRecs, recsSeen = -1, recsKey = -1;
 	private final int[] recCheck = new int[REC];
@@ -3548,7 +3562,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			recs = Arrays.copyOf(recs, recs.length * 2);
 		}
-		r = prepare(scene, k, params, recs, nRecs * REC) ? nRecs++ : -2;
+		r = prepare(scene, k, params, recs, nRecs * REC, true) ? nRecs++ : -2;
 		if (ref >= 0)
 		{
 			f.tileRec[ref] = r;
@@ -3560,8 +3574,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		return r;
 	}
 
-	// entry k's record into out from at; false when it isn't a static draw (one for drawRenderable's other branches)
-	private boolean prepare(Scene scene, int k, int[] params, int[] out, int at)
+	// entry k's record into out from at; false when it isn't a static draw (one for drawRenderable's other branches);
+	// keep: an at-rest animated object's copied numbers kept with the records (else into checkVerts, for the check)
+	private boolean prepare(Scene scene, int k, int[] params, int[] out, int at, boolean keep)
 	{
 		final FastOrder f = fastOrder;
 		final Object key = f.keys[k], src = f.ksrc[k];
@@ -3608,6 +3623,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			out[at + 11] = 0;
 			return true;
 		}
+		if (key instanceof net.runelite.api.DynamicObject && src instanceof TileObject && f.kkind[k] != FastOrder.K_ITEM)
+		{
+			return preparePushed(scene, k, params, out, at, keep, (net.runelite.api.DynamicObject) key, (TileObject) src);
+		}
 		if (!(key instanceof Model))
 		{
 			return false;
@@ -3651,6 +3670,76 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		return true;
 	}
 
+	// an at-rest animated object's record: zoneEntry's still path (drawRenderable's temporary branch with the object's
+	// getModelZbuf), its model copied now
+	private boolean preparePushed(Scene scene, int k, int[] params, int[] out, int at, boolean keep,
+		net.runelite.api.DynamicObject d, TileObject src)
+	{
+		final Model still = d.getModelZbuf();
+		if (still == null || still.getSceneId() == sceneId)
+		{
+			return false;
+		}
+		final boolean shown = renderCallbackManager.drawObject(scene, src);
+		final long hash = fastOrder.draw(k, params);
+		if (params[0] < 0)
+		{
+			return false;
+		}
+		final int x = params[1], y = params[2], z = params[3];
+		d.setModelHeight(still.getModelHeight());
+		still.calculateBoundsCylinder();
+		final boolean see = still.getFaceTransparencies() != null || still.getTransparency() != 0;
+		final boolean painter = painterModels && d.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		final boolean hasUv = SceneUploader.hasUv(still);
+		prepVB.clear();
+		prepUB.clear();
+		final int len = sceneUploader.pushModel(still, prepVB, prepUB);
+		prepVB.flip();
+		prepUB.flip();
+		final int[] verts = new int[prepVB.getBuffer().remaining()];
+		prepVB.getBuffer().get(verts);
+		final float[] uvs = hasUv ? new float[prepUB.getBuffer().remaining()] : null;
+		if (uvs != null)
+		{
+			prepUB.getBuffer().get(uvs);
+		}
+		final int m = markOf(scene, d, x, z, hash);
+		int data = -1;
+		if (keep)
+		{
+			if (nRecData == recVerts.length)
+			{
+				int c = nRecData * 2;
+				recVerts = Arrays.copyOf(recVerts, c);
+				recUvs = Arrays.copyOf(recUvs, c);
+				recKeys = Arrays.copyOf(recKeys, c);
+			}
+			data = nRecData++;
+			recVerts[data] = verts;
+			recUvs[data] = uvs;
+			recKeys[data] = d;
+		}
+		else
+		{
+			checkVerts = verts;
+			checkUvs = uvs;
+		}
+		out[at] = len;
+		out[at + 1] = hasUv ? 1 : 0;
+		out[at + 2] = 0;
+		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+		out[at + 4] = x;
+		out[at + 5] = y;
+		out[at + 6] = z;
+		out[at + 7] = still.getXYZMag();
+		out[at + 8] = still.getBottomY();
+		out[at + 9] = still.getModelHeight();
+		out[at + 10] = RB_PUSHED | (see ? RB_SEE : 0) | (painter ? RB_PAINTER : 0) | (shown ? 0 : RB_NONE);
+		out[at + 11] = data;
+		return true;
+	}
+
 	// a prepared draw into the frame's draw buffers, as its callback would have put it
 	private void drawRecord(int r)
 	{
@@ -3658,6 +3747,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int b = r * REC, bits = R[b + 10];
 		if ((bits & RB_NONE) != 0)
 		{
+			return;
+		}
+		if ((bits & RB_PUSHED) != 0)
+		{
+			drawPushed(R, b, bits);
 			return;
 		}
 		if ((bits & RB_GROUND) != 0)
@@ -3743,6 +3837,53 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		return a / depth < c;
 	}
 
+	private void drawPushed(int[] R, int b, int bits)
+	{
+		final int d = R[b + 11];
+		final Integer up = zoneDyn.get(recKeys[d]);
+		if (up != null)
+		{
+			// moving this frame: the client's model, as handed over
+			if (up >= 0)
+			{
+				zoneQueue(up);
+			}
+			return;
+		}
+		if (!visibleFast(R[b + 7], R[b + 8], R[b + 9], R[b + 4] - frameCamX, R[b + 5] - frameCamY, R[b + 6] - frameCamZ))
+		{
+			return;
+		}
+		final int len = R[b];
+		final int[] verts = recVerts[d];
+		vertexBuffer.ensureCapacity(verts.length);
+		vertexBuffer.getBuffer().put(verts);
+		int uvAt = -1;
+		final float[] uvs = recUvs[d];
+		if (uvs != null)
+		{
+			uvBuffer.ensureCapacity(uvs.length);
+			uvBuffer.getBuffer().put(uvs);
+			uvAt = tempUvOffset;
+			tempUvOffset += len;
+		}
+		bufferForTriangles(len / 3).stage(tempOffset, uvAt, len / 3, targetBufferOffset, R[b + 3], R[b + 4], R[b + 5], R[b + 6]);
+		final int before = targetBufferOffset;
+		tempOffset += len;
+		targetBufferOffset += len;
+		if (len > 0)
+		{
+			if ((bits & RB_SEE) != 0)
+			{
+				seeRange(before, len);
+			}
+			if ((bits & RB_PAINTER) != 0)
+			{
+				painterRange(before, len);
+			}
+		}
+	}
+
 	// the developer check (Zone mode: check the walk): every prepared draw this frame worked out again from the client's
 	// getters, against its record
 	private void checkRecords(Scene scene, int[] params)
@@ -3761,10 +3902,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				continue;
 			}
 			recChecked++;
-			boolean same = prepare(scene, k, params, recCheck, 0);
-			for (int j = 0; same && j < REC; j++)
+			boolean same = prepare(scene, k, params, recCheck, 0, false);
+			final boolean pushed = (recs[r * REC + 10] & RB_PUSHED) != 0;
+			for (int j = 0; same && j < (pushed ? REC - 1 : REC); j++)
 			{
 				same = recCheck[j] == recs[r * REC + j];
+			}
+			if (same && pushed)
+			{
+				final int d = recs[r * REC + 11];
+				same = Arrays.equals(checkVerts, recVerts[d]) && Arrays.equals(checkUvs, recUvs[d]);
 			}
 			if (!same)
 			{
@@ -3788,6 +3935,15 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	}
 
 	private long lastRecCheckLog;
+
+	// the at-rest objects' copied numbers dropped with the records
+	private void dropRecData()
+	{
+		Arrays.fill(recVerts, 0, nRecData, null);
+		Arrays.fill(recUvs, 0, nRecData, null);
+		Arrays.fill(recKeys, 0, nRecData, null);
+		nRecData = 0;
+	}
 
 	// one entry of the walk, drawn as the old mode's callbacks would have drawn it
 	private void zoneEntry(Scene scene, Object key, Object src, byte kind, int k, int[] params)

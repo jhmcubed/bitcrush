@@ -91,7 +91,8 @@ final class FastOrder
 	// what the sweep reads from nearly every tile, apart in compact arrays (11/19/2026: in st, two cache lines a tile,
 	// the sweep spent most of its time waiting on memory): its number of objects, their mask, what it has, its ground
 	// (paint or shaped model), its ground decoration's place, renderable and object
-	private final int[] nobj = new int[ALL], tmask = new int[ALL], hs = new int[ALL], gx = new int[ALL], gy = new int[ALL];
+	// (the first three packed in meta: the objects' mask, bits 0-3; what it has, 4-9; the number of objects, 12-15)
+	private final int[] meta = new int[ALL], gx = new int[ALL], gy = new int[ALL];
 	private final Object[] groundAt = new Object[ALL], gRen = new Object[ALL], gObj = new Object[ALL];
 	// HAS: what the tile has
 	private static final int H_WALL = 1, H_DECOR = 2, H_ITEMS = 4, H_BRIDGE = 8, H_GROUND = 16, H_GOBJ = 32;
@@ -215,7 +216,7 @@ final class FastOrder
 
 	private boolean putObject(int o, int i, int x, int y)
 	{
-		int k = nobj[i];
+		int k = (meta[i] >>> 12);
 		for (int j = 0; j < k; j++)
 		{
 			if (st[i * STRIDE + OBJ + j] == o)
@@ -228,8 +229,7 @@ final class FastOrder
 			return false;
 		}
 		st[i * STRIDE + OBJ + k] = o;
-		nobj[i] = k + 1;
-		tmask[i] |= mask(o, x, y);
+		meta[i] = (meta[i] & ~(15 << 12) | (k + 1) << 12) | mask(o, x, y);
 		return true;
 	}
 
@@ -455,7 +455,7 @@ final class FastOrder
 						fl[i] = EXISTS;
 						continue;
 					}
-					fl[i] = EXISTS | PRIMARY | SECONDARY | (nobj[i] > 0 ? LEFT : 0);
+					fl[i] = EXISTS | PRIMARY | SECONDARY | ((meta[i] >>> 12) > 0 ? LEFT : 0);
 					planeUsed[p] = true;
 					pending++;
 				}
@@ -507,7 +507,7 @@ final class FastOrder
 						fl[i] = EXISTS;
 						continue;
 					}
-					fl[i] = EXISTS | PRIMARY | SECONDARY | (nobj[i] > 0 ? LEFT : 0);
+					fl[i] = EXISTS | PRIMARY | SECONDARY | ((meta[i] >>> 12) > 0 ? LEFT : 0);
 					planeUsed[p] = true;
 					pending++;
 				}
@@ -809,7 +809,7 @@ final class FastOrder
 		{
 			return;
 		}
-		for (int k = 0, nk = nobj[i]; k < nk; k++)
+		for (int k = 0, nk = (meta[i] >>> 12); k < nk; k++)
 		{
 			int o = st[i * STRIDE + OBJ + k];
 			for (int fx = Math.max(0, oSx[o]); fx <= Math.min(SIZE - 1, oEx[o]); fx++)
@@ -844,7 +844,7 @@ final class FastOrder
 			overflowTiles--;
 		}
 		final int b = i * STRIDE;
-		tmask[i] = nobj[i] = 0;
+		meta[i] = 0;
 		if (tile == null)
 		{
 			fl[i] = 0;
@@ -921,7 +921,7 @@ final class FastOrder
 				continue;
 			}
 			final int i = (p * SIZE + x) * SIZE + y, b = i * STRIDE, r = i * RSTRIDE;
-			if (tileAt[i] == null || (hs[i] & H_ITEMS) != 0)
+			if (tileAt[i] == null || ((meta[i] >>> 4 & 63) & H_ITEMS) != 0)
 			{
 				continue;
 			}
@@ -931,9 +931,9 @@ final class FastOrder
 				itemHas = Arrays.copyOf(itemHas, nItemSlots * 2);
 			}
 			itemSlot[nItemSlots] = i;
-			itemHas[nItemSlots] = hs[i];
+			itemHas[nItemSlots] = (meta[i] >>> 4 & 63);
 			nItemSlots++;
-			hs[i] |= H_ITEMS;
+			meta[i] |= H_ITEMS << 4;
 			st[b + IH] = il.getHeight();
 			st[b + IX] = il.getX();
 			st[b + IY] = il.getY();
@@ -964,8 +964,8 @@ final class FastOrder
 				tempMask = Arrays.copyOf(tempMask, nTempSlots * 2);
 			}
 			tempSlot[nTempSlots] = i;
-			tempNobj[nTempSlots] = nobj[i];
-			tempMask[nTempSlots] = tmask[i];
+			tempNobj[nTempSlots] = (meta[i] >>> 12);
+			tempMask[nTempSlots] = (meta[i] & 15);
 			nTempSlots++;
 			final int p = i / PLANE, rem = i - p * PLANE, x = rem / SIZE, y = rem - x * SIZE;
 			for (int e = tempFirst[i]; e >= 0; e = tempNext[e])
@@ -998,15 +998,14 @@ final class FastOrder
 		for (int k = 0; k < nTempSlots; k++)
 		{
 			final int i = tempSlot[k];
-			nobj[i] = tempNobj[k];
-			tmask[i] = tempMask[k];
+			meta[i] = meta[i] & ~(15 << 12 | 15) | tempNobj[k] << 12 | tempMask[k];
 		}
 		nTempSlots = 0;
 		tempIndex.clear();
 		nObj = nStatic;
 		for (int k = 0; k < nItemSlots; k++)
 		{
-			hs[itemSlot[k]] = itemHas[k];
+			meta[itemSlot[k]] = meta[itemSlot[k]] & ~(63 << 4) | itemHas[k] << 4;
 		}
 		nItemSlots = 0;
 	}
@@ -1031,7 +1030,7 @@ final class FastOrder
 						continue;
 					}
 					final int b = i * STRIDE;
-					tmask[i] = nobj[i] = 0;
+					meta[i] = 0;
 					fl[i] = EXISTS;
 					GameObject[] gos = tile.getGameObjects();
 					if (gos != null)
@@ -1182,7 +1181,7 @@ final class FastOrder
 		{
 			has |= H_BRIDGE;
 		}
-		hs[i] = has;
+		meta[i] = meta[i] & ~(63 << 4) | has << 4;
 	}
 
 	// the big object g seen on tile (p, x, y), slot i: the one already made for it this frame, or a new one
@@ -1197,7 +1196,7 @@ final class FastOrder
 		if (fx == x && fy == y)
 		{
 			// the footprint's first tile in the setup's order: made here (once, if the tile lists it twice)
-			for (int k = 0; k < nobj[i]; k++)
+			for (int k = 0; k < (meta[i] >>> 12); k++)
 			{
 				int o = st[i * STRIDE + OBJ + k];
 				if (oG[o] == g)
@@ -1221,7 +1220,7 @@ final class FastOrder
 			int f = (p * SIZE + fx) * SIZE + fy;
 			if (fx >= xmin && fx < xmax && fy >= ymin && fy < ymax && (fl[f] & EXISTS) != 0)
 			{
-				for (int k = 0, nk = nobj[f]; k < nk; k++)
+				for (int k = 0, nk = (meta[f] >>> 12); k < nk; k++)
 				{
 					int o = st[f * STRIDE + OBJ + k];
 					if (oG[o] == g)
@@ -1321,6 +1320,22 @@ final class FastOrder
 		return (x > oSx[o] ? 1 : 0) + (x < oEx[o] ? 4 : 0) + (y > oSy[o] ? 8 : 0) + (y < oEy[o] ? 2 : 0);
 	}
 
+	// a prepared draw, by its number (lean)
+	private void note(int rec)
+	{
+		if (n == keys.length)
+		{
+			keys = Arrays.copyOf(keys, n * 2);
+			kx = Arrays.copyOf(kx, n * 2);
+			kz = Arrays.copyOf(kz, n * 2);
+			ksrc = Arrays.copyOf(ksrc, n * 2);
+			kkind = Arrays.copyOf(kkind, n * 2);
+			kref = Arrays.copyOf(kref, n * 2);
+			krec = Arrays.copyOf(krec, n * 2);
+		}
+		krec[n++] = rec;
+	}
+
 	// ref: where the entry's prepared draw is kept (zone mode): a tile's slot and role (role * ALL + t, 0 or more), a
 	// static object (-(o + 2)), or none (-1). With lean on, an entry whose draw is prepared already is noted by that
 	// alone (krec), without the rest (11/19/2026: writing the six arrays, two of objects, was a tenth of the sweep);
@@ -1400,7 +1415,7 @@ final class FastOrder
 					{
 						continue;
 					}
-					final int mask = tmask[t];
+					final int mask = (meta[t] & 15);
 					if (x <= cx && x > xmin && blocks(t - SIZE, mask, 1)
 						|| x >= cx && x < xmax - 1 && blocks(t + SIZE, mask, 4)
 						|| y <= cy && y > ymin && blocks(t - 1, mask, 8)
@@ -1421,7 +1436,7 @@ final class FastOrder
 			{
 				boolean ok = true;
 				final int edges = pf[t] & 15, ea = pf[t] >> 4 & 15;
-				for (int k = 0, nk = nobj[t]; k < nk; k++)
+				for (int k = 0, nk = (meta[t] >>> 12); k < nk; k++)
 				{
 					int o = st[t * STRIDE + OBJ + k];
 					if (oDrawn[o] != stamp && (mask(o, x, y) & edges) == ea)
@@ -1433,7 +1448,7 @@ final class FastOrder
 				if (ok)
 				{
 					final int b = t * STRIDE;
-					if ((hs[t] & H_WALL) != 0)
+					if (((meta[t] >>> 4 & 63) & H_WALL) != 0)
 					{
 						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1, R_W1 * ALL + t);
 					}
@@ -1525,7 +1540,7 @@ final class FastOrder
 
 	private void first(int t, int p, int x, int y)
 	{
-		final int b = t * STRIDE, r = t * RSTRIDE, has = hs[t];
+		final int b = t * STRIDE, r = t * RSTRIDE, has = (meta[t] >>> 4 & 63);
 		if ((has & H_BRIDGE) != 0)
 		{
 			// rare: read from the bridge's tile as CpuOrder does
@@ -1551,7 +1566,16 @@ final class FastOrder
 		final boolean hasGround = (has & H_GROUND) != 0;
 		if (hasGround)
 		{
-			emit(groundAt[t], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, tileAt[t], K_GROUND, R_GROUND * ALL + t);
+			// (lean: a prepared draw noted by its number before anything else of the tile is read)
+			final int rec = lean ? tileRec[R_GROUND * ALL + t] : -1;
+			if (rec >= 0)
+			{
+				note(rec);
+			}
+			else
+			{
+				emit(groundAt[t], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, tileAt[t], K_GROUND, R_GROUND * ALL + t);
+			}
 		}
 
 		final boolean w = (has & H_WALL) != 0, d = (has & H_DECOR) != 0;
@@ -1590,7 +1614,15 @@ final class FastOrder
 		{
 			if ((has & H_GOBJ) != 0)
 			{
-				emit(gRen[t], gx[t], gy[t], gObj[t], K_GOBJ, R_G * ALL + t);
+				final int rec = lean ? tileRec[R_G * ALL + t] : -1;
+				if (rec >= 0)
+				{
+					note(rec);
+				}
+				else
+				{
+					emit(gRen[t], gx[t], gy[t], gObj[t], K_GOBJ, R_G * ALL + t);
+				}
 			}
 			if ((has & H_ITEMS) != 0 && st[b + IH] == 0)
 			{
@@ -1598,7 +1630,7 @@ final class FastOrder
 			}
 		}
 
-		int m = tmask[t];
+		int m = (meta[t] & 15);
 		if (m != 0)
 		{
 			if (x < cx && (m & 4) != 0)
@@ -1632,7 +1664,7 @@ final class FastOrder
 	{
 		fl[t] &= ~LEFT;
 		nReady = 0;
-		for (int k = 0, nk = nobj[t]; k < nk; k++)
+		for (int k = 0, nk = (meta[t] >>> 12); k < nk; k++)
 		{
 			int o = st[t * STRIDE + OBJ + k];
 			if (oDrawn[o] == stamp)
@@ -1721,7 +1753,7 @@ final class FastOrder
 
 	private void second(int t)
 	{
-		final int b = t * STRIDE, r = t * RSTRIDE, has = hs[t];
+		final int b = t * STRIDE, r = t * RSTRIDE, has = (meta[t] >>> 4 & 63);
 		if ((has & H_ITEMS) != 0 && st[b + IH] != 0)
 		{
 			items(t);

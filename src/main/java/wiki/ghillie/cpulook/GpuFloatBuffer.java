@@ -71,6 +71,19 @@ class GpuFloatBuffer
 		return buffer;
 	}
 
+	// a plain array of at least size, for writing a model whole before putting it in the buffer (SceneUploader.pushModel;
+	// a buffer is written on one thread at a time)
+	private float[] scratch = new float[0];
+
+	float[] scratch(int size)
+	{
+		if (scratch.length < size)
+		{
+			scratch = new float[Math.max(size, scratch.length * 2)];
+		}
+		return scratch;
+	}
+
 	static FloatBuffer allocateDirect(int size)
 	{
 		return ByteBuffer.allocateDirect(size * Float.BYTES)

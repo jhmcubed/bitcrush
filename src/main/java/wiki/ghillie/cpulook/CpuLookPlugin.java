@@ -2281,12 +2281,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int height = bufferProvider.getHeight();
 
 		GL43C.glBindBuffer(GL43C.GL_PIXEL_UNPACK_BUFFER, interfacePbo);
-		ByteBuffer interfaceBuf = GL43C.glMapBuffer(GL43C.GL_PIXEL_UNPACK_BUFFER, GL43C.GL_WRITE_ONLY);
+		// mapped with its old contents invalidated (11/19/2026): a plain glMapBuffer waits for the card to finish last
+		// frame's copy out of it, about 1 ms a frame once the card was busy (his station: "the interface's upload" 1.9 ms
+		// with zone mode's own thread, 0.18 without); the driver now hands fresh storage instead, the same pixels
+		final long pboSize = (long) lastCanvasWidth * lastCanvasHeight * 4;
+		final int ints = (int) Math.min((long) width * height, pboSize / 4);
+		ByteBuffer interfaceBuf = pboSize > 0 ? GL43C.glMapBufferRange(GL43C.GL_PIXEL_UNPACK_BUFFER, 0, pboSize,
+			GL43C.GL_MAP_WRITE_BIT | GL43C.GL_MAP_INVALIDATE_BUFFER_BIT) : null;
 		if (interfaceBuf != null)
 		{
 			interfaceBuf
 				.asIntBuffer()
-				.put(pixels, 0, width * height);
+				.put(pixels, 0, ints);
 			GL43C.glUnmapBuffer(GL43C.GL_PIXEL_UNPACK_BUFFER);
 		}
 		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, interfaceTexture);

@@ -275,6 +275,20 @@ public interface CpuLookConfig extends Config
 		return false;
 	}
 
+	@Range(min = 0, max = 15)
+	@ConfigItem(
+		keyName = "zoneThreads",
+		name = "Zone mode's render threads",
+		description = "How many threads the client spreads its own zone-mode work over (its picking: every tile and object's clickbox), as RuneLite's GPU plugin's Threads (3). Turn the plugin off and on after changing it.",
+		position = 45,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default int zoneThreads()
+	{
+		return 3;
+	}
+
 	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",

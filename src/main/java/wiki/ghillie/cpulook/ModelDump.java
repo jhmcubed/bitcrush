@@ -39,7 +39,8 @@ import net.runelite.api.Model;
  */
 final class ModelDump
 {
-	static final int VERSION = 1;
+	// 2 (11/19/2026): the model's colour override (amount, hue, saturation, lightness) as four bytes after the faces
+	static final int VERSION = 2;
 
 	private ModelDump()
 	{
@@ -54,7 +55,7 @@ final class ModelDump
 		final int[] c1 = m.getFaceColors1(), c2 = m.getFaceColors2(), c3 = m.getFaceColors3();
 		final byte[] pri = m.getFaceRenderPriorities(), alpha = m.getFaceTransparencies(), bias = m.getFaceBias();
 		final short[] tex = m.getFaceTextures();
-		ByteBuffer b = ByteBuffer.allocate(4 * 20 + nv * 12 + nf * (24 + 3 + 2)).order(ByteOrder.LITTLE_ENDIAN);
+		ByteBuffer b = ByteBuffer.allocate(4 * 20 + nv * 12 + nf * (24 + 3 + 2) + 4).order(ByteOrder.LITTLE_ENDIAN);
 		b.putInt(VERSION).putInt(nv).putInt(nf).putInt(renderMode).putInt(orientation).putInt(x).putInt(y).putInt(z)
 			.putInt(camX).putInt(camY).putInt(camZ).putInt(yaw).putInt(pitch).putInt(zoom).putInt(centerX).putInt(centerY)
 			.putInt(viewW).putInt(viewH).putInt(m.getTransparency()).putInt(m.getRadius());
@@ -68,6 +69,7 @@ final class ModelDump
 			b.put(pri != null && f < pri.length ? pri[f] : 0).put(alpha != null && f < alpha.length ? alpha[f] : 0)
 				.put(bias != null && f < bias.length ? bias[f] : 0).putShort(tex != null && f < tex.length ? tex[f] : -1);
 		}
+		b.put(m.getOverrideAmount()).put(m.getOverrideHue()).put(m.getOverrideSaturation()).put(m.getOverrideLuminance());
 		Deflater d = new Deflater(Deflater.BEST_COMPRESSION);
 		d.setInput(b.array(), 0, b.position());
 		d.finish();

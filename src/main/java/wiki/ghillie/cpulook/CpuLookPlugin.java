@@ -4076,6 +4076,20 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 			return CpuLookPlugin.this.prepare(scene, key, src, kind, prepParams, recs, nRecs * REC, true) ? nRecs++ : -2;
 		}
+
+		@Override
+		public boolean redo(int rec)
+		{
+			// a record that draws nothing at rest (prepareEmpty) for an animated object that has a model at rest now
+			final int b = rec * REC;
+			if (b + REC > recs.length || (recs[b + 10] & RB_PUSHED) == 0)
+			{
+				return false;
+			}
+			final int data = recs[b + 11];
+			return data >= 0 && data < nRecData && recVerts[data] == null && recKeys[data] instanceof net.runelite.api.DynamicObject
+				&& ((net.runelite.api.DynamicObject) recKeys[data]).getModelZbuf() != null;
+		}
 	};
 	private int nRecs, recsSeen = -1, recsKey = -1;
 	private final int[] recCheck = new int[REC];

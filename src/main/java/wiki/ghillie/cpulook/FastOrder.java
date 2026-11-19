@@ -939,6 +939,13 @@ final class FastOrder
 				if (known != null)
 				{
 					o = known;
+					// (11/19/2026, his tour: an object's record is kept by the object across its zone's reads, so an
+					// animated one first read mid-animation kept drawing nothing at rest, 10-35 seconds after arriving
+					// in Prifddinas and Varrock, until the whole scene was read again)
+					if (preparer != null && oR[o] != null && oRec[o] >= 0 && preparer.redo(oRec[o]))
+					{
+						oRec[o] = preparer.prepare(oR[o], g, K_OBJ);
+					}
 				}
 				else
 				{
@@ -1375,6 +1382,13 @@ final class FastOrder
 		void reset();
 
 		int prepare(Object key, Object src, byte kind);
+
+		// whether a kept object's record must be made again when its zone is read again (an animated object prepared
+		// mid-animation, with no model at rest then, that has one now)
+		default boolean redo(int rec)
+		{
+			return false;
+		}
 	}
 
 	Preparer preparer;

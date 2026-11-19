@@ -3094,13 +3094,24 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 			return;
 		}
-		if (r instanceof net.runelite.api.DynamicObject || params == null)
+		Model still = null;
+		if (params == null)
 		{
-			// an animated object the client didn't hand over this frame (out of its zones in view), or the reference
-			// walk's entry without its source: not drawn
+			// the reference walk's entry, without its source: not drawn (rare: a tile with over 8 objects)
 			return;
 		}
-		else
+		if (r instanceof net.runelite.api.DynamicObject)
+		{
+			// one the client didn't hand over this frame: in zone mode only the ones animating come through drawDynamic;
+			// the rest (POH furniture, farming patches, objects whose look follows the game's state) are the zone's static
+			// scenery, drawn from their model without animation (11/19/2026, Jace: his POH jewellery box and a building
+			// missing), as RuneLite's zone plugin uploads them
+			still = ((net.runelite.api.DynamicObject) r).getModelZbuf();
+			if (still == null)
+			{
+				return;
+			}
+		}
 		{
 			if (src instanceof TileObject && !renderCallbackManager.drawObject(scene, (TileObject) src))
 			{
@@ -3119,7 +3130,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int before = targetBufferOffset;
 		drawnSeeThrough = false;
 		drawnPainter = false;
-		drawRenderable(null, scene, r, null, o, x, y, z, hash);
+		drawRenderable(null, scene, r, still, o, x, y, z, hash);
 		if (drawnSeeThrough && targetBufferOffset > before)
 		{
 			seeRange(before, targetBufferOffset - before);

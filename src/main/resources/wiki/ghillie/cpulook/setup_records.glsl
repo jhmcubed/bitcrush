@@ -39,7 +39,10 @@
 // A record: 8 ivec4 (rows; edge; colour: a textured face's ints, a plain face's floats as bits after the slope; the
 // texture's terms three; the depth key as bits; the box, min and max + 1 packed in 16 bits each, then the face's number).
 
-layout(local_size_x = 256) in;
+#ifndef RECORD_GROUP
+#define RECORD_GROUP 256
+#endif
+layout(local_size_x = RECORD_GROUP) in;
 
 layout(std140) uniform uniforms {
   float cameraYaw;
@@ -110,7 +113,17 @@ int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
     return 0;
   }
   vert a = vin[f * 3], b = vin[f * 3 + 1], c = vin[f * 3 + 2];
-  vec4 ua = uvin[f * 3], ub = uvin[f * 3 + 1], uc = uvin[f * 3 + 2];
+  // the texture's points and number, and the bias: only the full setup's (11/19/2026: the count read them too, half
+  // of its memory traffic, his GPU Trace 3: the count bound by memory), and only a face that has them (0x20000: the
+  // compute pass wrote none)
+  vec4 ua = vec4(0.0), ub = vec4(0.0), uc = vec4(0.0);
+#ifdef WRITE_RECORDS
+  if ((a.ahsl & 0x20000) == 0) {
+    ua = uvin[f * 3];
+    ub = uvin[f * 3 + 1];
+    uc = uvin[f * 3 + 2];
+  }
+#endif
   vec3 v[3] = vec3[3](a.pos, b.pos, c.pos);
   int ah[3] = int[3](a.ahsl, b.ahsl, c.ahsl);
   vec3 tp[3] = vec3[3](ua.yzw, ub.yzw, uc.yzw);
@@ -146,7 +159,36 @@ void main() {
   }
   uint fo = faceOf[i];
   int f = int(fo & 0x7fffffffu);
+#if defined(WRITE_EXPERIMENT) && WRITE_EXPERIMENT == 1
+  // the developer's experiment (Diagnostics -> Records: the write's experiment, Memory only): the record's reads and
+  // writes, the same bytes, without its setup (the picture wrong)
+  vert a = vin[f * 3], b = vin[f * 3 + 1], c = vin[f * 3 + 2];
+  vec4 ua = vec4(0.0), ub = vec4(0.0), uc = vec4(0.0);
+  if ((a.ahsl & 0x20000) == 0) {
+    ua = uvin[f * 3];
+    ub = uvin[f * 3 + 1];
+    uc = uvin[f * 3 + 2];
+  }
+  int k = i * 8;
+  recs[k] = ivec4(floatBitsToInt(a.pos), a.ahsl);
+  recs[k + 1] = ivec4(floatBitsToInt(b.pos), b.ahsl);
+  recs[k + 2] = ivec4(floatBitsToInt(c.pos), c.ahsl);
+  recs[k + 3] = floatBitsToInt(ua);
+  recs[k + 4] = floatBitsToInt(ub);
+  recs[k + 5] = floatBitsToInt(uc);
+  recs[k + 6] = ivec4(f, int(fo), 0, 0);
+  recs[k + 7] = ivec4(0, 0, f, 0);
+#elif defined(WRITE_EXPERIMENT) && WRITE_EXPERIMENT == 2
+  // ... Setup only: the record's setup without its writes (a write behind a test that never passes keeps the setup
+  // from being left out; the picture wrong)
+  faceSetup(f, true, alpha, r0, r1);
+  Rec r = (fo >> 31) != 0u ? r1 : r0;
+  if (r.rows.x == 0x7fffffff && r.key.x == 12345.0) {
+    writeRec(i, r, f);
+  }
+#else
   faceSetup(f, true, alpha, r0, r1);
   writeRec(i, (fo >> 31) != 0u ? r1 : r0, f);
+#endif
 #endif
 }

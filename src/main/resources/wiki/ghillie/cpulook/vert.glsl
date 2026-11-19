@@ -41,7 +41,9 @@ out vec3 gTexPos;
 void main() {
   gVertex = vert;
   gAhsl = ahsl;
-  gTextureId = int(uv.x) & 511;
-  gBias = (((int(uv.x) >> 9) & 255) ^ 128) - 128;  // the bias is a signed byte, as the CPU takes it
-  gTexPos = uv.yzw;
+  // a face without texture slots (0x20000: the compute pass wrote none, 11/19/2026) as if they were all 0
+  vec4 u = (ahsl & 0x20000) != 0 ? vec4(0.0) : uv;
+  gTextureId = int(u.x) & 511;
+  gBias = (((int(u.x) >> 9) & 255) ^ 128) - 128;  // the bias is a signed byte, as the CPU takes it
+  gTexPos = u.yzw;
 }

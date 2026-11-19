@@ -367,6 +367,40 @@ public interface CpuLookConfig extends Config
 		return true;
 	}
 
+	enum RecordWrite
+	{
+		NORMAL("As built"),
+		MEMORY("Memory only (wrong picture)"),
+		SETUP("Setup only (wrong picture)"),
+		GROUPS_64("Groups of 64");
+
+		private final String name;
+
+		RecordWrite(String name)
+		{
+			this.name = name;
+		}
+
+		@Override
+		public String toString()
+		{
+			return name;
+		}
+	}
+
+	@ConfigItem(
+		keyName = "recordWrite",
+		name = "Records: the write's experiment",
+		description = "For measuring where the record write's time goes (11/19/2026, his GPU Trace 3: 2.6 ms with the card mostly idle). As built; Memory only: each record's reads and writes without its setup (the picture wrong); Setup only: each record's setup without its writes (the picture wrong); Groups of 64: the same write in workgroups of 64 threads, not 256 (the same picture). Read the frame timings' \"writing\" with each.",
+		position = 52,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default RecordWrite recordWrite()
+	{
+		return RecordWrite.NORMAL;
+	}
+
 	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",

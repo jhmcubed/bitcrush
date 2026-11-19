@@ -457,7 +457,10 @@ void write_face(uint localId, modelinfo minfo, int myOffset) {
     int mark = ((flags & (1 << 28)) != 0 ? 0x800000 : 0) | ((flags & (1 << 27)) != 0 ? 0x400000 : 0)
       | ((flags & (1 << 29)) != 0 ? 0x200000 : 0)  // render mode 2 (geom.glsl's painterPass)
       | ((flags & (1 << 30)) != 0 ? 0x80000 : 0)  // the CPU's solid pass only: never its see-through faces
-      | (cam ? 0x40000 : 0);  // already in camera space: the setup doesn't turn it (setup.glsl's toCorner)
+      | (cam ? 0x40000 : 0)  // already in camera space: the setup doesn't turn it (setup.glsl's toCorner)
+      // no texture slots (no texture, no bias): its texture points aren't written, so its readers take them as 0
+      // (11/19/2026: the zeros were 48 bytes a face of the card's memory traffic, written here and read back)
+      | (toffset < 0 ? 0x20000 : 0);
     // (the face's bias rides on in its texture slot, uv.x's bits 9-16: SceneUploader.pushModel)
     thisrvA.ahsl &= ~0xff0000;
     thisrvB.ahsl &= ~0xff0000;
@@ -477,9 +480,7 @@ void write_face(uint localId, modelinfo minfo, int myOffset) {
     vout[outOffset + myOffset * 3 + 2] = vert(vertC.xyz, thisrvC.ahsl | mark);
 
     if (toffset < 0) {
-      uvout[outOffset + myOffset * 3] = vec4(0);
-      uvout[outOffset + myOffset * 3 + 1] = vec4(0);
-      uvout[outOffset + myOffset * 3 + 2] = vec4(0);
+      // (none: marked 0x20000 above)
     } else if (cam) {
       // the texture's points in camera space too (the boat upload turned them with the corners)
       uvout[outOffset + myOffset * 3] = temptexb[toffset + localId * 3];

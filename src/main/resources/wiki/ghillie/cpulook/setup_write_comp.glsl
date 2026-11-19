@@ -27,4 +27,5 @@
 #include version_header
 
 #define WRITE_RECORDS
+#include write_config
 #include "setup_records.glsl"

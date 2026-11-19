@@ -38,6 +38,8 @@ uniform int phase;
 uniform int faceCount;
 uniform int blockCount;
 uniform int capacity;
+// the write's workgroup size (its dispatch below; setup_records.glsl's RECORD_GROUP)
+uniform int writeGroup = 256;
 
 layout(std430, binding = 2) buffer counts_buffer {
   uvec2 counts[];
@@ -141,6 +143,6 @@ void main() {
     // a list cut short draws only whole faces' records that fit (setup_comp.glsl writes none that don't)
     commands[0] = uvec4(a * 6u, 1u, 0u, 0u);
     commands[1] = uvec4(b * 6u, 1u, 0u, 0u);
-    commands[2] = uvec4((a + b + 255u) / 256u, 1u, 1u, 0u);
+    commands[2] = uvec4((a + b + uint(writeGroup) - 1u) / uint(writeGroup), 1u, 1u, 0u);
   }
 }

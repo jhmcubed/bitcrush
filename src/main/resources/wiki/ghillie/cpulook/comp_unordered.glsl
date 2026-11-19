@@ -75,7 +75,8 @@ void main() {
 
   // the CPU look: the ground marked (bit 22), for "the ground hides what's under it"
   // and every corner of it marked as a ground tile (bit 20): the CPU textures tiles with its own routine
-  int mark = ((flags & (1 << 27)) != 0 ? 0x400000 : 0) | 0x100000 | (cam ? 0x40000 : 0);
+  int mark = ((flags & (1 << 27)) != 0 ? 0x400000 : 0) | 0x100000 | (cam ? 0x40000 : 0)
+    | (toffset < 0 ? 0x20000 : 0);  // no texture slots: its texture points not written (priority_render.glsl says why)
 
   // position vertices in scene and write to out buffer
   vout[outOffset + myOffset * 3] = vert(vertA, thisA.ahsl | mark);
@@ -83,9 +84,7 @@ void main() {
   vout[outOffset + myOffset * 3 + 2] = vert(vertC, thisC.ahsl | mark);
 
   if (toffset < 0) {
-    uvout[outOffset + myOffset * 3] = vec4(0);
-    uvout[outOffset + myOffset * 3 + 1] = vec4(0);
-    uvout[outOffset + myOffset * 3 + 2] = vec4(0);
+    // (none: marked 0x20000 above)
   } else if (flags >= 0) {
     uvout[outOffset + myOffset * 3] = texPos + temptexb[toffset + localId * 3];
     uvout[outOffset + myOffset * 3 + 1] = texPos + temptexb[toffset + localId * 3 + 1];

@@ -263,6 +263,30 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int glTinyComputeProgram = -1;
 	// faces that surely draw nothing not written by the compute pass, only marked (priority_render.glsl's SKIP_EMPTY)
 	private boolean skipEmpty;
+	// the developer's experiments on the record write (Diagnostics -> Records: the write's experiment)
+	private CpuLookConfig.RecordWrite recordWrite = CpuLookConfig.RecordWrite.NORMAL;
+
+	// the record write's compile-time choices (setup_write_comp.glsl): its experiment and its workgroup size
+	static String writeConfig(CpuLookConfig.RecordWrite w)
+	{
+		switch (w)
+		{
+			case MEMORY:
+				return "#define WRITE_EXPERIMENT 1\n";
+			case SETUP:
+				return "#define WRITE_EXPERIMENT 2\n";
+			case GROUPS_64:
+				return "#define RECORD_GROUP 64\n";
+			default:
+				return "";
+		}
+	}
+
+	// the write's workgroup size (the scan sizes its dispatch by it)
+	private int writeGroup()
+	{
+		return recordWrite == CpuLookConfig.RecordWrite.GROUPS_64 ? 64 : 256;
+	}
 	private int glSetupProgram = -1;
 	private int glSetupWriteProgram = -1;
 	// the fog's uniform locations (fogDepth, drawDistance, expandedChunks, fogColor), in the geometry stage's program
@@ -285,7 +309,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int overflowSlot;
 	private final IntBuffer overflowTotals = BufferUtils.createIntBuffer(4);
 	private int uniSetupViewSize, uniSetupFaceCount, uniSetupTwoLists, uniSetupBlock, uniSetupWriteViewSize, uniSetupWriteBlock;
-	private int uniScanPhase, uniScanFaceCount, uniScanBlockCount, uniScanCapacity;
+	private int uniScanPhase, uniScanFaceCount, uniScanBlockCount, uniScanCapacity, uniScanWriteGroup;
 	private int uniRecViewSize, uniRecListB, uniRecCpuFlags, uniRecGroundPass, uniRecGroundAllowance, uniRecPalette, uniRecTick,
 		uniRecBlock, uniRecTextures, uniRecTextureAnimations;
 	private int glMidComputeProgram = -1;
@@ -886,7 +910,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					}
 				});
 			}
-			else if (configChanged.getKey().equals("skipEmpty"))
+			else if (configChanged.getKey().equals("skipEmpty") || configChanged.getKey().equals("recordWrite"))
 			{
 				// compiled in or out (the comparison is with the programs as they were)
 				clientThread.invokeLater(() ->
@@ -1004,6 +1028,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				return skipEmpty ? "#define SKIP_EMPTY\n" : "";
 			}
+			if ("write_config".equals(key))
+			{
+				return writeConfig(recordWrite);
+			}
 			return null;
 		});
 		template.addInclude(CpuLookPlugin.class);
@@ -1013,6 +1041,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private void initProgram() throws ShaderException
 	{
 		skipEmpty = !Build.DEVELOPER || config.skipEmpty();
+		recordWrite = Build.DEVELOPER ? config.recordWrite() : CpuLookConfig.RecordWrite.NORMAL;
 		Template template = createTemplate(-1, -1);
 		glProgram = PROGRAM.compile(template);
 		glUiProgram = UI_PROGRAM.compile(template);
@@ -1118,6 +1147,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			uniScanFaceCount = GL43C.glGetUniformLocation(glScanProgram, "faceCount");
 			uniScanBlockCount = GL43C.glGetUniformLocation(glScanProgram, "blockCount");
 			uniScanCapacity = GL43C.glGetUniformLocation(glScanProgram, "capacity");
+			uniScanWriteGroup = GL43C.glGetUniformLocation(glScanProgram, "writeGroup");
 			uniRecViewSize = GL43C.glGetUniformLocation(glRecordProgram, "viewSize");
 			uniRecFog[0] = GL43C.glGetUniformLocation(glRecordProgram, "fogDepth");
 			uniRecFog[1] = GL43C.glGetUniformLocation(glRecordProgram, "drawDistance");
@@ -6130,6 +6160,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUniform1i(uniScanFaceCount, faces);
 		GL43C.glUniform1i(uniScanBlockCount, blocks);
 		GL43C.glUniform1i(uniScanCapacity, capacity);
+		GL43C.glUniform1i(uniScanWriteGroup, writeGroup());
 		GL43C.glUniform1i(uniScanPhase, 0);
 		GL43C.glDispatchCompute(blocks, 1, 1);
 		GL43C.glMemoryBarrier(GL43C.GL_SHADER_STORAGE_BARRIER_BIT);

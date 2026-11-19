@@ -444,6 +444,23 @@ class SceneUploader
 	public int pushModel(Model model, GpuIntBuffer vertexBuffer, GpuFloatBuffer uvBuffer, float[] vertexX, float[] vertexY,
 		float[] vertexZ)
 	{
+		return pushModel(model, vertexBuffer, uvBuffer, vertexX, vertexY, vertexZ, 0, null);
+	}
+
+	/**
+	 * ... and with a scene's colour override (11/19/2026: a boat the game hides for overlapping another, which it draws
+	 * flattened onto the water and tinted; Scene.getOverrideHue and the rest, packed by sceneTint: amount << 24, hue
+	 * << 16, saturation << 8, lightness, each a byte). While its amount is above 0 the CPU tints every face of every
+	 * model in that scene that isn't textured (fo.bv: the face count in place of the model's own override's count;
+	 * fr.am and fr.ad: the client's interpolation, interpolateHSL here), in place of the model's own override; a flat
+	 * face (one colour) from its colour already through the palette (fr.am is handed the palette's RGB and treats it as
+	 * a colour number: the client's own way, kept), so palette is the CPU's palette for it.
+	 */
+	public int pushModel(Model model, GpuIntBuffer vertexBuffer, GpuFloatBuffer uvBuffer, float[] vertexX, float[] vertexY,
+		float[] vertexZ, int sceneTint, int[] palette)
+	{
+		final byte tintAmount = (byte) (sceneTint >> 24), tintHue = (byte) (sceneTint >> 16), tintSat = (byte) (sceneTint >> 8),
+			tintLum = (byte) sceneTint;
 		final int triangleCount = Math.min(model.getFaceCount(), CpuLookPlugin.MAX_TRIANGLE);
 
 		vertexBuffer.ensureCapacity(triangleCount * 12);
@@ -486,6 +503,7 @@ class SceneUploader
 			int color1 = color1s[face];
 			int color2 = color2s[face];
 			int color3 = color3s[face];
+			final boolean flat = color3 == -1;
 
 			if (color3 == -1)
 			{
@@ -510,7 +528,20 @@ class SceneUploader
 			// HSL override is not applied to textured faces
 			if (faceTextures == null || faceTextures[face] == -1)
 			{
-				if (overrideAmount > 0)
+				if (tintAmount > 0)
+				{
+					if (flat && palette != null)
+					{
+						color1 = color2 = color3 = interpolateHSL(palette[color1 & 0xffff], tintHue, tintSat, tintLum, tintAmount);
+					}
+					else
+					{
+						color1 = interpolateHSL(color1, tintHue, tintSat, tintLum, tintAmount);
+						color2 = interpolateHSL(color2, tintHue, tintSat, tintLum, tintAmount);
+						color3 = interpolateHSL(color3, tintHue, tintSat, tintLum, tintAmount);
+					}
+				}
+				else if (overrideAmount > 0)
 				{
 					color1 = interpolateHSL(color1, overrideHue, overrideSat, overrideLum, overrideAmount);
 					color2 = interpolateHSL(color2, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -1280,7 +1311,14 @@ class SceneUploader
 		return faceTransparency;
 	}
 
-	private static int interpolateHSL(int hsl, byte hue2, byte sat2, byte lum2, byte lerp)
+	// a scene's colour override packed for pushModel (each a byte: amount, hue, saturation, lightness)
+	static int sceneTint(Scene scene)
+	{
+		return (scene.getOverrideAmount() & 0xff) << 24 | (scene.getOverrideHue() & 0xff) << 16
+			| (scene.getOverrideSaturation() & 0xff) << 8 | scene.getOverrideLuminance() & 0xff;
+	}
+
+	static int interpolateHSL(int hsl, byte hue2, byte sat2, byte lum2, byte lerp)
 	{
 		int hue = hsl >> 10 & 63;
 		int sat = hsl >> 7 & 7;

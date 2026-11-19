@@ -401,8 +401,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// solid faces before any see-through one, so a see-through face blends wherever its key beats the solid one's)
 	private int lastCpuWidth = -1;
 	private int lastCpuHeight = -1;
-	// the CPU's palette (65536 colours at the client's brightness) as a 256 × 256 texture
+	// the CPU's palette (65536 colours at the client's brightness) as a 256 × 256 texture, and as built (a hidden
+	// boat's flat faces' tint: SceneUploader.pushModel)
 	private int paletteTexture = -1;
+	private volatile int[] paletteRgb;
 	private double paletteBrightness = -1;
 	// the client's sine and cosine tables, for the compute pass's turning of models
 	private final GLBuffer sinCosBuffer = new GLBuffer("sin cos table");
@@ -1816,6 +1818,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private void buildPalette(double brightness)
 	{
 		final int[] rgb = Palette.build(brightness);
+		paletteRgb = rgb;
 		ByteBuffer pal = BufferUtils.createByteBuffer(65536 * 4);
 		for (int c : rgb)
 		{
@@ -3121,6 +3124,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		Scene scene;
 		final float[] matrix = new float[16];
 		int camX, camZ, minLevel, maxLevel;
+		// the scene's colour override (SceneUploader.sceneTint): a boat hidden for overlapping another is tinted (and
+		// flattened onto the water, which its matrix already does)
+		int tint;
 		// its temporary objects this frame (its crew and the rest on deck, drawTemp), in the order handed over
 		GameObject[] temps = new GameObject[16];
 		int nTemps;
@@ -3195,7 +3201,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private final CpuOrder boatOrder = new CpuOrder();
 	private final int[] boatParams = new int[4];
 	// the developer's count of boats drawn and what they held, for the log, and of the matrices the crew came with
-	private int boatFrames, boatsSeen, boatsDrawn, boatDraws, boatMatrixChecks, boatMatrixSame;
+	private int boatFrames, boatsSeen, boatsDrawn, boatDraws, boatMatrixChecks, boatMatrixSame, boatsTinted;
 	private long lastBoatLog;
 
 	private Boat boatOf(Scene scene)
@@ -3249,6 +3255,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		b.camZ = (int) cameraZ;
 		b.minLevel = minLevel;
 		b.maxLevel = maxLevel;
+		// (the game sets it on the boat's scene before drawing it, sn.at and sn.bd; ei.jz makes it the rasterizer's for
+		// the boat's whole draw)
+		b.tint = SceneUploader.sceneTint(scene);
 	}
 
 	// a model on a boat copied into a stage: its corners through its own turn and place and the boat's matrix (fo.mi),
@@ -3273,7 +3282,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		BoatMath.corners(s.mat, model.getVerticesX(), model.getVerticesY(), model.getVerticesZ(), count, s.cx, s.cy, s.cz);
 		final boolean painter = painterModels && r != null && r.getRenderMode() == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		final boolean hasUv = SceneUploader.hasUv(model);
-		final int len = sceneUploader.pushModel(model, s.vb, s.ub, s.cx, s.cy, s.cz);
+		final int len = sceneUploader.pushModel(model, s.vb, s.ub, s.cx, s.cy, s.cz, boat.tint, paletteRgb);
 		final int m = markOf(scene, r, x, z, hash);
 		s.off[i] = s.v;
 		s.uvOff[i] = hasUv ? s.uv : -1;
@@ -3556,6 +3565,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				boatsDrawn++;
 				boatDraws += b.n;
+				boatsTinted += (byte) (b.tint >> 24) > 0 ? 1 : 0;
 			}
 		}
 		if (Build.DEVELOPER && nb > 0)
@@ -3566,9 +3576,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			if (now - lastBoatLog > 5_000_000_000L)
 			{
 				lastBoatLog = now;
-				log.info("Bitcrush boats, in the last five seconds: {} frames with boats, {} boats handed over, {} found in the top level and drawn, {} draws in them; the crew's matrices the same as preSceneDraw's: {} of {}",
-					boatFrames, boatsSeen, boatsDrawn, boatDraws, boatMatrixSame, boatMatrixChecks);
-				boatFrames = boatsSeen = boatsDrawn = boatDraws = boatMatrixChecks = boatMatrixSame = 0;
+				log.info("Bitcrush boats, in the last five seconds: {} frames with boats, {} boats handed over, {} found in the top level and drawn ({} of them hidden for overlap, tinted), {} draws in them; the crew's matrices the same as preSceneDraw's: {} of {}",
+					boatFrames, boatsSeen, boatsDrawn, boatsTinted, boatDraws, boatMatrixSame, boatMatrixChecks);
+				boatFrames = boatsSeen = boatsDrawn = boatDraws = boatMatrixChecks = boatMatrixSame = boatsTinted = 0;
 			}
 		}
 	}

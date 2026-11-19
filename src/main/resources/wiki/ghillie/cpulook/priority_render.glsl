@@ -94,23 +94,16 @@ int count_prio_offset(int priority) {
   return total;
 }
 
-void get_face(uint localId, modelinfo minfo, float cameraYaw, float cameraPitch, out int prio, out int dis, out vert o1, out vert o2, out vert o3) {
+// A face's corners read and turned for the model's orientation (11/19/2026: read again where they're needed instead of
+// kept in registers through the sort, every face of a thread's, which crowded the big tiers' registers: his Prifddinas
+// timings had the 1024 x 2 and 1024 x 4 tiers at 2.2 ms for 720 models; the same arithmetic, so the same bytes:
+// ShaderCheck's golden copy)
+void load_face(uint localId, modelinfo minfo, out vert o1, out vert o2, out vert o3) {
   int size = minfo.size;
   int offset = minfo.offset;
   int flags = minfo.flags;
-  uint ssboOffset;
-
-  if (localId < size) {
-    ssboOffset = localId;
-  } else {
-    ssboOffset = 0;
-  }
-
-  vert thisA;
-  vert thisB;
-  vert thisC;
-
-  // Grab triangle vertices from the correct buffer
+  uint ssboOffset = localId < size ? localId : 0;
+  vert thisA, thisB, thisC;
   if (flags < 0) {
     thisA = vb[offset + ssboOffset * 3];
     thisB = vb[offset + ssboOffset * 3 + 1];
@@ -120,51 +113,38 @@ void get_face(uint localId, modelinfo minfo, float cameraYaw, float cameraPitch,
     thisB = tempvb[offset + ssboOffset * 3 + 1];
     thisC = tempvb[offset + ssboOffset * 3 + 2];
   }
-
   if (localId < size) {
     int orientation = flags & 0x7ff;
-
-    // rotate for model orientation
-    vec4 thisrvA = rotate_vertex(vec4(thisA.pos, 0), orientation);
-    vec4 thisrvB = rotate_vertex(vec4(thisB.pos, 0), orientation);
-    vec4 thisrvC = rotate_vertex(vec4(thisC.pos, 0), orientation);
-
-    // calculate distance to face
-    int thisPriority = (thisA.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
-    // the CPU look: the CPU's own whole-unit depth (cpu_depth.glsl), not RuneLite's float one, so faces at almost the
-    // same depth (a tree's canopy is full of them) come in the CPU's order
-    int thisDistance = cpu_face_distance(thisrvA, thisrvB, thisrvC, ivec3(minfo.x, minfo.y, minfo.z));
-
-    o1.pos = thisrvA.xyz;
-    o1.ahsl = thisA.ahsl;
-
-    o2.pos = thisrvB.xyz;
-    o2.ahsl = thisB.ahsl;
-
-    o3.pos = thisrvC.xyz;
-    o3.ahsl = thisC.ahsl;
-
-    prio = thisPriority;
-    dis = thisDistance;
+    o1 = vert(rotate_vertex(vec4(thisA.pos, 0), orientation).xyz, thisA.ahsl);
+    o2 = vert(rotate_vertex(vec4(thisB.pos, 0), orientation).xyz, thisB.ahsl);
+    o3 = vert(rotate_vertex(vec4(thisC.pos, 0), orientation).xyz, thisC.ahsl);
   } else {
-    o1.pos = vec3(0);
-    o1.ahsl = 0;
-
-    o2.pos = vec3(0);
-    o2.ahsl = 0;
-
-    o3.pos = vec3(0);
-    o3.ahsl = 0;
-
-    prio = 0;
-    dis = 0;
+    o1 = vert(vec3(0), 0);
+    o2 = vert(vec3(0), 0);
+    o3 = vert(vec3(0), 0);
   }
 }
 
-void add_face_prio_distance(uint localId, modelinfo minfo, vert thisrvA, vert thisrvB, vert thisrvC, int thisPriority, int thisDistance, ivec4 pos) {
+// what the sort keeps of a face through its barriers: its priority, its distance, and whether it faces the camera
+// (face_visible, for the priorities' averages)
+void face_key(uint localId, modelinfo minfo, out int prio, out int dis, out bool visible) {
+  vert a, b, c;
+  load_face(localId, minfo, a, b, c);
+  if (localId < minfo.size) {
+    prio = (a.ahsl >> 16) & 0xf;  // all vertices on the face have the same priority
+    dis = cpu_face_distance(vec4(a.pos, 0), vec4(b.pos, 0), vec4(c.pos, 0), ivec3(minfo.x, minfo.y, minfo.z));
+    visible = face_visible(a.pos, b.pos, c.pos, ivec4(minfo.x, minfo.y, minfo.z, 0));
+  } else {
+    prio = 0;
+    dis = 0;
+    visible = false;
+  }
+}
+
+void add_face_prio_distance(uint localId, modelinfo minfo, bool visible, int thisPriority, int thisDistance) {
   if (localId < minfo.size) {
     // if the face is not culled, it is calculated into priority distance averages
-    if (face_visible(thisrvA.pos, thisrvB.pos, thisrvC.pos, pos)) {
+    if (visible) {
       atomicAdd(totalNum[thisPriority], 1);
       atomicAdd(totalDistance[thisPriority], thisDistance);
 
@@ -358,10 +338,12 @@ void sort_priorities() {
 }
 #endif
 
-void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDistance, vert thisrvA, vert thisrvB, vert thisrvC) {
+void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDistance) {
   int size = minfo.size;
 
   if (localId < size) {
+    vert thisrvA, thisrvB, thisrvC;
+    load_face(localId, minfo, thisrvA, thisrvB, thisrvC);
     int outOffset = minfo.idx;
     int toffset = minfo.toffset;
     int flags = minfo.flags;

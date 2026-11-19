@@ -60,21 +60,21 @@ void main() {
     }
   }
 
+  // kept through the barriers: each face's priority, distance and facing only; its corners are read again where
+  // they're written (priority_render.glsl's load_face)
   int prio[FACES_PER_THREAD];
   int dis[FACES_PER_THREAD];
-  vert vA[FACES_PER_THREAD];
-  vert vB[FACES_PER_THREAD];
-  vert vC[FACES_PER_THREAD];
+  bool vis[FACES_PER_THREAD];
 
   for (int i = 0; i < FACES_PER_THREAD; i++) {
-    get_face(localId + i, minfo, cameraYaw, cameraPitch, prio[i], dis[i], vA[i], vB[i], vC[i]);
+    face_key(localId + i, minfo, prio[i], dis[i], vis[i]);
   }
 
   memoryBarrierShared();
   barrier();
 
   for (int i = 0; i < FACES_PER_THREAD; i++) {
-    add_face_prio_distance(localId + i, minfo, vA[i], vB[i], vC[i], prio[i], dis[i], pos);
+    add_face_prio_distance(localId + i, minfo, vis[i], prio[i], dis[i]);
   }
 
   memoryBarrierShared();
@@ -101,6 +101,6 @@ void main() {
 #endif
 
   for (int i = 0; i < FACES_PER_THREAD; i++) {
-    sort_and_insert(localId + i, minfo, prioAdj[i], dis[i], vA[i], vB[i], vC[i]);
+    sort_and_insert(localId + i, minfo, prioAdj[i], dis[i]);
   }
 }

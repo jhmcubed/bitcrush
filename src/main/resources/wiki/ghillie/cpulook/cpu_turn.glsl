@@ -23,6 +23,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef CPU_TURN_GLSL
+#define CPU_TURN_GLSL
 // The client's camera turn for every corner (its Model.draw and its tiles; claude/cpu-look.md, "Read from today's
 // client", follow-up 1): the corner given relative to the camera, turned by the yaw and then the pitch in floats,
 // in the client's order. precise: no fused multiply-adds, so each product and sum rounds as Java's floats do.
@@ -34,3 +36,4 @@ vec3 cpu_turn(vec3 v) {
   precise float z2 = v.y * cameraRotF.z + z1 * cameraRotF.w;
   return vec3(x1, y2, z2);
 }
+#endif

@@ -242,6 +242,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int glComputeProgram;
 	private int glSmallComputeProgram;
 	private int glTinyComputeProgram = -1;
+	// the record path's count in the compute pass (count_fused.glsl): built so; done so this frame
+	private boolean fuseCount, fusedCount;
 	private int glSetupProgram = -1;
 	private int glSetupWriteProgram = -1;
 	// the fog's uniform locations (fogDepth, drawDistance, expandedChunks, fogColor), in the geometry stage's program
@@ -916,6 +918,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				return records ? versionHeader + "#define RECORDS\n" : "#version 400\n";
 			}
+			if ("count_config".equals(key))
+			{
+				return fuseCount ? "#define FUSED_COUNT\n" : "";
+			}
 			return null;
 		});
 		template.addInclude(CpuLookPlugin.class);
@@ -930,6 +936,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 		if (computeMode == ComputeMode.OPENGL)
 		{
+			// the record path's count inside the compute pass (count_fused.glsl), where the card gives the compute
+			// programs a ninth storage buffer (the least OpenGL promises is eight)
+			fuseCount = GL43C.glGetInteger(GL43C.GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS) >= 9
+				&& GL43C.glGetInteger(GL43C.GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS) >= 9;
 			glComputeProgram = COMPUTE_PROGRAM.compile(createTemplate(1024, 6));
 			glSmallComputeProgram = SMALL_COMPUTE_PROGRAM.compile(createTemplate(512, 1));
 			glTinyComputeProgram = TINY_COMPUTE_PROGRAM.compile(createTemplate(TINY_TRIANGLE_COUNT, 1));
@@ -2042,6 +2052,24 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUniformBlockBinding(glSmallComputeProgram, uniBlockSmall, 0);
 		GL43C.glUniformBlockBinding(glComputeProgram, uniBlockLarge, 0);
 
+		// the record path's count done in the compute pass this frame (count_fused.glsl), its empty faces not written
+		decideFrame();
+		fusedCount = fuseCount && fRecords;
+		if (fuseCount)
+		{
+			growBuffer(recCounts, GL43C.GL_SHADER_STORAGE_BUFFER, Math.max(1, targetBufferOffset / 3) * 8, GL43C.GL_DYNAMIC_DRAW);
+			GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 8, recCounts.glBufferId);
+			countUniforms(glUnorderedComputeProgram);
+			countUniforms(glSmallComputeProgram);
+			countUniforms(glTinyComputeProgram);
+			countUniforms(glMidComputeProgram);
+			countUniforms(glComputeProgram);
+			for (int p : glBigComputePrograms)
+			{
+				countUniforms(p);
+			}
+		}
+
 		if (timing)
 		{
 			tierModels[0] = unorderedModels;
@@ -2407,11 +2435,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				timer.mark(FrameTimer.SCENE_START);
 			}
-			final boolean depthBuffer = Build.DEVELOPER && config.depthBuffer();
-			final boolean plainTriangles = Build.DEVELOPER && config.plainTriangles();
-			final boolean ground = groundHides && !depthBuffer;
+			if (!fDecided)
+			{
+				decideFrame();
+			}
+			fDecided = false;
+			final boolean depthBuffer = fDepthBuffer;
+			final boolean plainTriangles = fPlainTriangles;
+			final boolean ground = fGround;
 			// the CPU's own depth test: each pixel's key, the greater kept (frag.glsl writes it as a depth)
-			final boolean keyTest = config.cpuDepthTest() && !depthBuffer;
+			final boolean keyTest = fKeyTest;
 			if (keyTest)
 			{
 				GL43C.glEnable(GL43C.GL_DEPTH_TEST);
@@ -2428,8 +2461,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				| (depthBuffer ? 8 : 0) | (plainTriangles ? 16 : 0) | (keyTest ? 32 : 0) | (Build.DEVELOPER && config.showBias() ? 64 : 0);
 			// the record path (stage A3): for the CPU look as it's normally drawn; the diagnostics that draw otherwise (a
 			// depth buffer, plain triangles, the old ground stopgap, the re-sort) keep the geometry stage
-			final boolean records = computeMode == ComputeMode.OPENGL && glRecordProgram != -1 && config.recordPath() && !depthBuffer
-				&& !ground && !plainTriangles && !orderTest && targetBufferOffset / 3 <= MAX_RECORD_FACES;
+			final boolean records = fRecords;
 			GL43C.glUseProgram(glProgram);
 			GL43C.glUniform2i(uniViewSize, viewportWidth, viewportHeight);
 			fogDepth = Math.max(0, Math.min(MAX_FOG_DEPTH, config.fogDepth()));
@@ -5204,7 +5236,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 4, recRecords.glBufferId);
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 5, recCommands.glBufferId);
 		GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 6, recFaces.glBufferId);
-		GL43C.glDispatchCompute((faces + 255) / 256, 1, 1);
+		if (!fusedCount)
+		{
+			GL43C.glDispatchCompute((faces + 255) / 256, 1, 1);
+		}
 		GL43C.glMemoryBarrier(GL43C.GL_SHADER_STORAGE_BARRIER_BIT);
 		if (timing)
 		{
@@ -5354,6 +5389,33 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				}
 			}
 		}
+	}
+
+	// the frame's ways of drawing, decided once before the compute pass (its fused count must know them) and used as
+	// they were by drawFrame
+	private boolean fDepthBuffer, fPlainTriangles, fGround, fKeyTest, fRecords, fDecided;
+
+	private void decideFrame()
+	{
+		fDepthBuffer = Build.DEVELOPER && config.depthBuffer();
+		fPlainTriangles = Build.DEVELOPER && config.plainTriangles();
+		fGround = groundHides && !fDepthBuffer;
+		fKeyTest = config.cpuDepthTest() && !fDepthBuffer;
+		fRecords = computeMode == ComputeMode.OPENGL && glRecordProgram != -1 && config.recordPath() && !fDepthBuffer
+			&& !fGround && !fPlainTriangles && !orderTest && targetBufferOffset / 3 <= MAX_RECORD_FACES;
+		fDecided = true;
+	}
+
+	// the fused count's inputs for a compute program: the viewport, the lists, whether empty faces are skipped
+	private void countUniforms(int program)
+	{
+		if (!fuseCount || program == -1)
+		{
+			return;
+		}
+		GL43C.glProgramUniform2i(program, GL43C.glGetUniformLocation(program, "viewSize"), viewportWidth, viewportHeight);
+		GL43C.glProgramUniform1i(program, GL43C.glGetUniformLocation(program, "twoLists"), fKeyTest ? 1 : 0);
+		GL43C.glProgramUniform1i(program, GL43C.glGetUniformLocation(program, "skipEmpty"), fusedCount ? 1 : 0);
 	}
 
 	// a compute tier's dispatch, bound as the small one is

@@ -340,16 +340,9 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
     thisrvB.ahsl &= ~0xff0000;
     thisrvC.ahsl &= ~0xff0000;
 
-    // write to out buffer
-    vout[outOffset + myOffset * 3] = vert(vertA.xyz, thisrvA.ahsl | mark);
-    vout[outOffset + myOffset * 3 + 1] = vert(vertB.xyz, thisrvB.ahsl | mark);
-    vout[outOffset + myOffset * 3 + 2] = vert(vertC.xyz, thisrvC.ahsl | mark);
-
-    if (toffset < 0) {
-      uvout[outOffset + myOffset * 3] = vec4(0);
-      uvout[outOffset + myOffset * 3 + 1] = vec4(0);
-      uvout[outOffset + myOffset * 3 + 2] = vec4(0);
-    } else {
+    // the texture slots, worked out before anything is written (the fused count needs them)
+    vec4 uA = vec4(0), uB = vec4(0), uC = vec4(0);
+    if (toffset >= 0) {
       vec4 texA, texB, texC;
 
       if (flags >= 0) {
@@ -375,9 +368,25 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
       texA = hillskew_rel(texA, pos, place, hillskew, minfo.y, plane);
       texB = hillskew_rel(texB, pos, place, hillskew, minfo.y, plane);
       texC = hillskew_rel(texC, pos, place, hillskew, minfo.y, plane);
-      uvout[outOffset + myOffset * 3] = texA.wxyz;
-      uvout[outOffset + myOffset * 3 + 1] = texB.wxyz;
-      uvout[outOffset + myOffset * 3 + 2] = texC.wxyz;
+      uA = texA.wxyz;
+      uB = texB.wxyz;
+      uC = texC.wxyz;
+    }
+
+#ifdef FUSED_COUNT
+    bool keep = countFace(outOffset / 3 + myOffset, vertA.xyz, vertB.xyz, vertC.xyz, thisrvA.ahsl | mark,
+      thisrvB.ahsl | mark, thisrvC.ahsl | mark, uA, uB, uC);
+#else
+    bool keep = true;
+#endif
+    if (keep) {
+      // write to out buffer
+      vout[outOffset + myOffset * 3] = vert(vertA.xyz, thisrvA.ahsl | mark);
+      vout[outOffset + myOffset * 3 + 1] = vert(vertB.xyz, thisrvB.ahsl | mark);
+      vout[outOffset + myOffset * 3 + 2] = vert(vertC.xyz, thisrvC.ahsl | mark);
+      uvout[outOffset + myOffset * 3] = uA;
+      uvout[outOffset + myOffset * 3 + 1] = uB;
+      uvout[outOffset + myOffset * 3 + 2] = uC;
     }
   }
 }

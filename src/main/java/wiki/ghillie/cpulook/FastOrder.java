@@ -515,6 +515,49 @@ final class FastOrder
 		}
 	}
 
+	/**
+	 * Zone mode: whether any tile of zone (zx, zz) passes the view's test, on any level (the client's zoneInFrustum: it
+	 * hands over a zone's moving models, temporary objects and items only for zones that pass; its own zone test, ei.rb,
+	 * isn't the tiles' test, so a tile the walk draws could sit in a zone it left out, 11/19/2026). True while the
+	 * scene isn't read yet.
+	 */
+	boolean zoneInView(Scene scene, Frustum f, int zx, int zz)
+	{
+		synchronized (this)
+		{
+			if (cached != scene || dirtyAll)
+			{
+				return true;
+			}
+		}
+		final boolean count = f.count;
+		f.count = false;
+		try
+		{
+			final int x0 = Math.max(0, zx << 3), y0 = Math.max(0, zz << 3);
+			final int x1 = Math.min(SIZE, (zx << 3) + 8), y1 = Math.min(SIZE, (zz << 3) + 8);
+			for (int p = 0; p < 4; p++)
+			{
+				for (int x = x0; x < x1; x++)
+				{
+					int i = (p * SIZE + x) * SIZE + y0;
+					for (int y = y0; y < y1; y++, i++)
+					{
+						if (inView(f, i, x, y))
+						{
+							return true;
+						}
+					}
+				}
+			}
+			return false;
+		}
+		finally
+		{
+			f.count = count;
+		}
+	}
+
 	private boolean inView(Frustum f, int i, int x, int y)
 	{
 		final int rl = lvl[i];

@@ -826,7 +826,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		return DrawCallbacks.GPU
 			| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
-			| (zoneMode ? DrawCallbacks.ZBUF | DrawCallbacks.RENDER_THREADS(zoneThreads) : 0);
+			| (zoneMode ? DrawCallbacks.ZBUF | DrawCallbacks.ZBUF_ZONE_FRUSTUM_CHECK | DrawCallbacks.RENDER_THREADS(zoneThreads) : 0);
 	}
 
 	private void setupSyncMode()
@@ -2881,7 +2881,50 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			zoneLevel = level;
 			zoneMaxLevel = maxLevel;
 			zoneHideRoofs = hideRoofIds != null ? hideRoofIds : java.util.Collections.emptySet();
+			zoneScene = scene;
+			if (zoneFrame)
+			{
+				// the view's test for the client's zoneInFrustum, which comes next (ei.jz, then ei.oi)
+				fillFrustum(scene);
+			}
 		}
+	}
+
+	private Scene zoneScene;
+
+	// the frame's view test: the camera, the screen (readClip at drawScene), the client's levels and hidden roofs
+	private void fillFrustum(Scene scene)
+	{
+		final FastOrder.Frustum fr = zoneFrustum;
+		fr.pitchSin = framePitchSin;
+		fr.pitchCos = framePitchCos;
+		fr.yawSin = frameYawSin;
+		fr.yawCos = frameYawCos;
+		fr.camX = frameCamX;
+		fr.camY = frameCamY;
+		fr.camZ = frameCamZ;
+		fr.zoom = client.get3dZoom();
+		fr.clipMidX2 = client.getRasterizer3D_clipMidX2();
+		fr.clipNegMidX = client.getRasterizer3D_clipNegativeMidX();
+		fr.clipNegMidY = client.getRasterizer3D_clipNegativeMidY();
+		fr.level = zoneLevel;
+		fr.maxLevel = zoneMaxLevel;
+		fr.roofRemoval = scene.getRoofRemovalMode() != 0;
+		fr.roofs = scene.getRoofs();
+		fr.hide = zoneHideRoofs;
+	}
+
+	// zone mode: which zones the client works on this frame (their moving models, temporary objects and items handed
+	// over): every zone with a tile the walk may draw (the client's flag ZBUF_ZONE_FRUSTUM_CHECK)
+	@Override
+	public boolean zoneInFrustum(int zx, int zz, int maxY, int minY)
+	{
+		final Scene scene = zoneScene;
+		if (!zoneFrame || scene == null)
+		{
+			return true;
+		}
+		return fastOrder.zoneInView(scene, zoneFrustum, zx, zz);
 	}
 
 	@Override
@@ -3268,8 +3311,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private void checkZoneWalk(Scene scene, int cx, int cz, int distance, CpuOrder.Visible visible)
 	{
 		cpuOrder.setTemps(tempG, temps);
+		cpuOrder.itemShown = il -> renderCallbackManager.drawObject(scene, il);
 		cpuOrder.build(scene, cx, cz, distance, visible);
 		cpuOrder.setTemps(null, 0);
+		cpuOrder.itemShown = null;
 		final FastOrder f = fastOrder;
 		final CpuOrder c = cpuOrder;
 		boolean same = f.n == c.n && f.gaveUp == c.gaveUp;
@@ -3360,22 +3405,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			zoneWhyNext = true;
 		}
 		final FastOrder.Frustum fr = zoneFrustum;
-		fr.pitchSin = ps;
-		fr.pitchCos = pc;
-		fr.yawSin = ys;
-		fr.yawCos = yc;
-		fr.camX = cx;
-		fr.camY = cy;
-		fr.camZ = cz;
-		fr.zoom = client.get3dZoom();
-		fr.clipMidX2 = client.getRasterizer3D_clipMidX2();
-		fr.clipNegMidX = client.getRasterizer3D_clipNegativeMidX();
-		fr.clipNegMidY = client.getRasterizer3D_clipNegativeMidY();
-		fr.level = level;
-		fr.maxLevel = maxLevel;
-		fr.roofRemoval = roofRemoval;
-		fr.roofs = roofs;
-		fr.hide = hide;
+		fillFrustum(scene);
 		fr.count = count;
 		// the static draws from their prepared records (made the first time each is drawn, kept until its zone is read
 		// again or the scene changes); the rest, and every draw while a diagnostic needs each call, as before. The
@@ -3409,8 +3439,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (reference)
 		{
 			cpuOrder.setTemps(tempG, temps);
+			cpuOrder.itemShown = il -> renderCallbackManager.drawObject(scene, il);
 			cpuOrder.build(scene, cx, cz, distance, visible);
 			cpuOrder.setTemps(null, 0);
+			cpuOrder.itemShown = null;
 		}
 		if (timing)
 		{

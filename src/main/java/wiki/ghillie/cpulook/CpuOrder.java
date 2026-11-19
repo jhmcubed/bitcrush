@@ -594,8 +594,15 @@ final class CpuOrder
 		}
 	}
 
+	// zone mode: the item piles drawn (those RuneLite's hooks don't hide, as the client hands over), or null for all
+	java.util.function.Predicate<ItemLayer> itemShown;
+
 	private void items(ItemLayer i)
 	{
+		if (itemShown != null && !itemShown.test(i))
+		{
+			return;
+		}
 		emit(i.getMiddle(), i.getX(), i.getY());
 		emit(i.getTop(), i.getX(), i.getY());
 		emit(i.getBottom(), i.getX(), i.getY());

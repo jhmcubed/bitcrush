@@ -196,6 +196,18 @@ class FrameTimer
 		zoneFrames = true;
 	}
 
+	// the uploads' parts this frame: the moving models' corners and texture points (bytes, ns), the draw lists
+	void uploadParts(long tempBytes, long tempNs, long modelBytes, long modelNs)
+	{
+		upTempBytes += tempBytes;
+		upTempNs += tempNs;
+		upModelBytes += modelBytes;
+		upModelNs += modelNs;
+		upFrames++;
+	}
+
+	private long upTempBytes, upTempNs, upModelBytes, upModelNs, upFrames;
+
 	void zoneThread(long workNs, long waitNs, long uploadNs, boolean redone)
 	{
 		zoneThreadNs += workNs;
@@ -460,6 +472,9 @@ class FrameTimer
 				+ "moving models the client hands over %.2f (%.0f models; added up over the client's threads, each copying its own "
 				+ "at the same time as the others, so the frame waits for less than this; on the client's own thread %.2f for %.0f)",
 				zoneCopyNs / n / 1e6, zoneCopies / n, zoneCopyOwnNs / n / 1e6, zoneCopiesOwn / n) : "")
+			+ (upFrames > 0 ? String.format("; of the uploads, the moving models' corners and texture points %.1f MB in %.2f ms, the "
+				+ "draw lists %.1f MB in %.2f ms", upTempBytes / (double) upFrames / 1e6, upTempNs / (double) upFrames / 1e6,
+				upModelBytes / (double) upFrames / 1e6, upModelNs / (double) upFrames / 1e6) : "")
 			+ (zoneThreadFrames > 0 ? String.format("; zone mode's own thread, in %d frames: the walk's second half and the draw list "
 				+ "%.2f (beside the client's interface and RuneLite's overlays), then in the frame's drawing the wait for it %.2f and the "
 				+ "uploads %.2f; done again on the client's thread in %d frames", zoneThreadFrames,
@@ -495,6 +510,7 @@ class FrameTimer
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;
+		upTempBytes = upTempNs = upModelBytes = upModelNs = upFrames = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);
@@ -594,6 +610,7 @@ class FrameTimer
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
 		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;
+		upTempBytes = upTempNs = upModelBytes = upModelNs = upFrames = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);

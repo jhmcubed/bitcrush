@@ -243,6 +243,34 @@ final class FastOrder
 	int n;
 	// the plugin's choice for the frame (zone mode's prepared draws, no check or diagnostic needing every entry in full)
 	boolean lean;
+	/**
+	 * Zone mode's draw list beside the sweep (11/19/2026): the entries made so far, given out every 64 (published) and in
+	 * full once the sweep is done (done; published written first), for another thread to follow; the entry arrays sized
+	 * when the frame begins (ensureEntries), and their fields read again after each look at published, in case they
+	 * grew.
+	 */
+	volatile int published;
+	volatile boolean done;
+
+	private void ensureEntries(int size)
+	{
+		if (keys.length >= size)
+		{
+			return;
+		}
+		int c = keys.length;
+		while (c < size)
+		{
+			c *= 2;
+		}
+		keys = Arrays.copyOf(keys, c);
+		kx = Arrays.copyOf(kx, c);
+		kz = Arrays.copyOf(kz, c);
+		ksrc = Arrays.copyOf(ksrc, c);
+		kkind = Arrays.copyOf(kkind, c);
+		kref = Arrays.copyOf(kref, c);
+		krec = Arrays.copyOf(krec, c);
+	}
 
 	static final byte K_GROUND = 0, K_WALL1 = 1, K_WALL2 = 2, K_DECOR1 = 3, K_DECOR2 = 4, K_GOBJ = 5, K_ITEM = 6, K_OBJ = 7;
 
@@ -423,8 +451,10 @@ final class FastOrder
 		}
 		finally
 		{
-			// (always: the kept tiles must stay as read)
+			// (always: the kept tiles must stay as read, and a thread following the entries must see the end)
 			takeTempsOff();
+			published = n;
+			done = true;
 		}
 		sweepNs = System.nanoTime() - t1;
 	}
@@ -436,7 +466,10 @@ final class FastOrder
 	{
 		setupNs = readNs = sweepNs = 0;
 		stamp++;
+		ensureEntries(n + (n >> 1) + 1024);
 		n = 0;
+		published = 0;
+		done = false;
 		if (nObj > nStatic)
 		{
 			nObj = nStatic;
@@ -1528,6 +1561,10 @@ final class FastOrder
 			krec = Arrays.copyOf(krec, n * 2);
 		}
 		krec[n++] = rec;
+		if ((n & 63) == 0)
+		{
+			published = n;
+		}
 	}
 
 	// ref: where the entry's prepared draw is kept (zone mode): a tile's slot and role (role * ALL + t, 0 or more), a
@@ -1557,6 +1594,10 @@ final class FastOrder
 			{
 				krec[n] = rec;
 				n++;
+				if ((n & 63) == 0)
+				{
+					published = n;
+				}
 				return;
 			}
 		}
@@ -1568,6 +1609,10 @@ final class FastOrder
 		kkind[n] = kind;
 		kref[n] = ref;
 		n++;
+		if ((n & 63) == 0)
+		{
+			published = n;
+		}
 	}
 
 	// (the sweep only visits places inside the square, so the slot is read directly; PRIMARY implies the tile exists)

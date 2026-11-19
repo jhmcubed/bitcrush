@@ -652,6 +652,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 						t.setDaemon(true);
 						return t;
 					});
+					zoneLister = java.util.concurrent.Executors.newSingleThreadExecutor(r ->
+					{
+						Thread t = new Thread(r, "Bitcrush zone draw list");
+						t.setDaemon(true);
+						return t;
+					});
 				}
 				else
 				{
@@ -713,6 +719,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			{
 				zoneWorker.shutdown();
 				zoneWorker = null;
+			}
+			if (zoneLister != null)
+			{
+				zoneLister.shutdown();
+				zoneLister = null;
 			}
 			client.setGpuFlags(0);
 			client.setDrawCallbacks(null);
@@ -1951,6 +1962,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		IntBuffer modelBufferUnordered = this.modelBufferUnordered.getBuffer();
 
 		// temp buffers (zone mode's stages at their places in them)
+		final long ut0 = timing ? System.nanoTime() : 0;
+		final long tempBytes = ((long) vertexBuffer.remaining() + uvBuffer.remaining() + (stagedV + stagedUv) * 4L) * 4;
 		if (stagedV > 0 || stagedUv > 0)
 		{
 			uploadStaged(tmpVertexBuffer, vertexBuffer, splitV, stagedV, false);
@@ -1964,6 +1977,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 
 		// model buffers
+		final long ut1 = timing ? System.nanoTime() : 0;
+		long modelBytes = (long) modelBuffer.remaining() + modelBufferSmall.remaining() + modelBufferTiny.remaining()
+			+ modelBufferMid.remaining() + modelBufferUnordered.remaining();
+		for (GpuIntBuffer b : this.modelBufferBig)
+		{
+			modelBytes += b.getBuffer().remaining();
+		}
+		modelBytes *= 4;
 		updateBuffer(tmpModelBufferLarge, GL43C.GL_ARRAY_BUFFER, modelBuffer, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
 		updateBuffer(tmpModelBufferSmall, GL43C.GL_ARRAY_BUFFER, modelBufferSmall, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
 		if (computeMode == ComputeMode.OPENGL)
@@ -1976,6 +1997,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 		}
 		updateBuffer(tmpModelBufferUnordered, GL43C.GL_ARRAY_BUFFER, modelBufferUnordered, GL43C.GL_DYNAMIC_DRAW, CL12.CL_MEM_READ_ONLY);
+		if (timing)
+		{
+			timer.uploadParts(tempBytes, ut1 - ut0, modelBytes, System.nanoTime() - ut1);
+		}
 
 		// Output buffers
 		updateBuffer(tmpOutBuffer,
@@ -3481,7 +3506,17 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			markOutput();
 			zoneAborted = false;
 			zoneDrawScene = scene;
-			zoneTask = zoneWorker.submit(() -> zoneWork(scene, visible, fr, true, true, true));
+			zoneStart = System.nanoTime();
+			if (zoneLister != null)
+			{
+				// the sweep on one thread, the draw list on another following its entries as they're made
+				zoneTask = zoneWorker.submit(() -> zoneSweep(scene, visible, fr));
+				zoneListTask = zoneLister.submit(this::zoneListFollowing);
+			}
+			else
+			{
+				zoneTask = zoneWorker.submit(() -> zoneWork(scene, visible, fr, true, true, true));
+			}
 			zonePostPending = true;
 			return;
 		}
@@ -3635,6 +3670,70 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int zoneStops, zoneThreadFrames;
 	private long lastZoneStopLog;
 
+	// the draw list's thread (11/19/2026): the sweep's entries drawn as it gives them out (FastOrder.published), so the
+	// two run side by side instead of one after the other; the same drawing as drawLoop's safe path, in the same order
+	private java.util.concurrent.ExecutorService zoneLister;
+	private java.util.concurrent.Future<?> zoneListTask;
+	private long zoneStart;
+	private volatile long zoneSweepEnd, zoneListEnd;
+
+	private void zoneSweep(Scene scene, CpuOrder.Visible visible, FastOrder.Frustum fr)
+	{
+		final long t0 = System.nanoTime();
+		fastOrder.finishCached(scene, visible, fr);
+		zoneWalkNs = System.nanoTime() - t0;
+		zoneSweepEnd = System.nanoTime();
+	}
+
+	private void zoneListFollowing()
+	{
+		final FastOrder f = fastOrder;
+		int fast = 0;
+		int k = 0;
+		try
+		{
+			while (true)
+			{
+				final boolean fin = f.done;
+				final int pub = f.published;
+				// (the arrays read after published: they may have grown)
+				final int[] krec = f.krec;
+				final Object[] keys = f.keys, src = f.ksrc;
+				for (; k < pub; k++)
+				{
+					if (krec[k] >= 0)
+					{
+						drawRecord(krec[k]);
+						fast++;
+						continue;
+					}
+					if (!zoneEntrySafe(keys[k], src[k]))
+					{
+						zoneAborted = true;
+						if (Build.DEVELOPER)
+						{
+							final int ref = f.kref[k];
+							zoneStopper = String.format("kind %d, %s, record %s", f.kkind[k],
+								keys[k] == null ? "nothing" : keys[k].getClass().getSimpleName(),
+								ref == -1 ? "none" : String.valueOf(ref >= 0 ? f.tileRec[ref] : f.oRec[-ref - 2]));
+						}
+						return;
+					}
+				}
+				if (fin)
+				{
+					break;
+				}
+				Thread.onSpinWait();
+			}
+		}
+		finally
+		{
+			zoneFast = fast;
+			zoneListEnd = System.nanoTime();
+		}
+	}
+
 	private void zoneWork(Scene scene, CpuOrder.Visible visible, FastOrder.Frustum fr, boolean lean, boolean prepared, boolean safe)
 	{
 		final long t0 = System.nanoTime();
@@ -3648,12 +3747,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// wait for the thread's frame, if it has one going
 	private void waitZone()
 	{
-		final java.util.concurrent.Future<?> t = zoneTask;
+		waitFor(zoneTask);
+		zoneTask = null;
+		waitFor(zoneListTask);
+		zoneListTask = null;
+	}
+
+	private void waitFor(java.util.concurrent.Future<?> t)
+	{
 		if (t == null)
 		{
 			return;
 		}
-		zoneTask = null;
 		try
 		{
 			t.get();
@@ -3679,6 +3784,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		zonePostPending = false;
 		final long w0 = timing ? System.nanoTime() : 0;
+		final boolean zoneListTaskUsed = zoneListTask != null;
 		waitZone();
 		final long waited = timing ? System.nanoTime() - w0 : 0;
 		fastOrder.lean = false;
@@ -3710,7 +3816,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (timing)
 		{
 			timer.order(fastOrder.readNs + zoneWalkNs, fastOrder.n, fastOrder.readNs, fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
-			timer.zoneThread(zoneWalkNs + zoneListNs, waited, System.nanoTime() - u0, redone);
+			final long work = zoneListTaskUsed ? Math.max(zoneSweepEnd, zoneListEnd) - zoneStart : zoneWalkNs + zoneListNs;
+			timer.zoneThread(work, waited, System.nanoTime() - u0, redone);
 		}
 	}
 

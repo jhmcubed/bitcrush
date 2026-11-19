@@ -118,87 +118,94 @@ struct Rec {
 // asked first there, and all the record path's count asks (11/18/2026), so both decide alike by construction. Out: the
 // rounded corners, twice the area (the routines' determinant), and the box the fragment stage is run over (min x, min
 // y, max x + 1, max y + 1: the top corner's row is the least y, the bottom's the greatest).
-bool coverage(vec2 f[3], out int x[3], out int y[3], out int det, out ivec4 box) {
-  for (int i = 0; i < 3; i++) {
-    precise float rx = f[i].x + 0.5;
-    precise float ry = f[i].y + 0.5;
-    x[i] = int(rx);
-    y[i] = int(ry);
-  }
-  det = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+// (11/19/2026: no arrays anywhere in the setup. NVIDIA's compiler left the loops over a face's three corners rolled
+// and so put every per-corner array in local memory, indexed at run time: 51 four-wide slots a thread in the count,
+// 68 in the write (their binaries from his card), the card's slow memory, and the count and write's time. Each corner
+// is now its own variables and the near cut's points four named slots; the very same arithmetic.)
+bool coverage(vec2 f0, vec2 f1, vec2 f2, out int x0, out int x1, out int x2, out int y0, out int y1, out int y2, out int det, out ivec4 box) {
+  precise float rx0 = f0.x + 0.5;
+  precise float ry0 = f0.y + 0.5;
+  precise float rx1 = f1.x + 0.5;
+  precise float ry1 = f1.y + 0.5;
+  precise float rx2 = f2.x + 0.5;
+  precise float ry2 = f2.y + 0.5;
+  x0 = int(rx0);
+  y0 = int(ry0);
+  x1 = int(rx1);
+  y1 = int(ry1);
+  x2 = int(rx2);
+  y2 = int(ry2);
+  box = ivec4(0);
+  det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
   if (det == 0) return false;  // no area once on whole pixels
-  int minX = max(0, min(x[0], min(x[1], x[2])));
-  int maxX = min(viewSize.x - 1, max(x[0], max(x[1], x[2])));
-  int minY = max(0, min(y[0], min(y[1], y[2])));
-  int maxY = min(viewSize.y, max(y[0], max(y[1], y[2]))) - 1;
+  int minX = max(0, min(x0, min(x1, x2)));
+  int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));
+  int minY = max(0, min(y0, min(y1, y2)));
+  int maxY = min(viewSize.y, max(y0, max(y1, y2))) - 1;
   if (minX > maxX || minY > maxY) return false;
   box = ivec4(minX, minY, maxX + 1, maxY + 1);
   return true;
 }
 
-// a[i] for i 0 to 2 by selects, not by indexing with a variable (which can put the array in the card's slower local
-// memory instead of its registers); the same value either way
-int pick3(int a[3], int i) {
-  return i == 0 ? a[0] : i == 1 ? a[1] : a[2];
+// the i-th of three by selects (0, 1 or 2)
+int pick3(int a0, int a1, int a2, int i) {
+  return i == 0 ? a0 : i == 1 ? a1 : a2;
 }
 
-float pick3(float a[3], int i) {
-  return i == 0 ? a[0] : i == 1 ? a[1] : a[2];
+float pick3(float a0, float a1, float a2, int i) {
+  return i == 0 ? a0 : i == 1 ? a1 : a2;
 }
 
-vec2 pick3(vec2 a[3], int i) {
-  return i == 0 ? a[0] : i == 1 ? a[1] : a[2];
+vec2 pick3(vec2 a0, vec2 a1, vec2 a2, int i) {
+  return i == 0 ? a0 : i == 1 ? a1 : a2;
 }
 
 bool covers(vec2 f0, vec2 f1, vec2 f2) {
-  vec2 f[3] = vec2[3](f0, f1, f2);
-  int x[3], y[3], det;
+  int x0, x1, x2, y0, y1, y2, det;
   ivec4 box;
-  return coverage(f, x, y, det, box);
+  return coverage(f0, f1, f2, x0, x1, x2, y0, y1, y2, det, box);
 }
 
-// One triangle: f the screen corners as floats (unrounded), s their depth keys, C their colours (hsl, or a textured
+// One triangle: f the screen corners as floats (unrounded), s their depth keys, c their colours (hsl, or a textured
 // face's lightness). The triangle routines round the corners; the depth key's steps come from the unrounded ones.
 // False if nothing of it is drawn (no area on whole pixels, or off the screen: coverage).
 bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, float s1, float s2, vec3 zc, int flags, ivec4 t0, ivec4 t1, int t40, int alpha, int bias, out Rec r) {
-  vec2 f[3] = vec2[3](f0, f1, f2);
-  float s[3] = float[3](s0, s1, s2);
-  int x[3], y[3], det;
+  int x0, x1, x2, y0, y1, y2, det;
   ivec4 box;
-  if (!coverage(f, x, y, det, box)) return false;
-  int C[3] = int[3](c0, c1, c2);
+  if (!coverage(f0, f1, f2, x0, x1, x2, y0, y1, y2, det, box)) return false;
 
-  int s01 = y[0] != y[1] ? idiv((x[1] - x[0]) << 14, y[1] - y[0]) : 0;
-  int s12 = y[1] != y[2] ? idiv((x[2] - x[1]) << 14, y[2] - y[1]) : 0;
-  int s02 = y[0] != y[2] ? idiv((x[2] - x[0]) << 14, y[2] - y[0]) : 0;
+  int s01 = y0 != y1 ? idiv((x1 - x0) << 14, y1 - y0) : 0;
+  int s12 = y1 != y2 ? idiv((x2 - x1) << 14, y2 - y1) : 0;
+  int s02 = y0 != y2 ? idiv((x2 - x0) << 14, y2 - y0) : 0;
 
   // the top corner, the middle one, and which edge is on the left
   int t, m, b;
   bool longLeft;
-  if (y[0] <= y[1] && y[0] <= y[2]) {
+  if (y0 <= y1 && y0 <= y2) {
     t = 0;
-    if (y[1] < y[2]) { m = 1; b = 2; longLeft = (y[0] != y[1] && s02 < s01) || (y[0] == y[1] && s02 > s12); }
-    else { m = 2; b = 1; longLeft = !((y[0] != y[2] && s02 < s01) || (y[0] == y[2] && s12 > s01)); }
-  } else if (y[1] <= y[2]) {
+    if (y1 < y2) { m = 1; b = 2; longLeft = (y0 != y1 && s02 < s01) || (y0 == y1 && s02 > s12); }
+    else { m = 2; b = 1; longLeft = !((y0 != y2 && s02 < s01) || (y0 == y2 && s12 > s01)); }
+  } else if (y1 <= y2) {
     t = 1;
-    if (y[2] < y[0]) { m = 2; b = 0; longLeft = (y[1] != y[2] && s01 < s12) || (y[1] == y[2] && s01 > s02); }
+    if (y2 < y0) { m = 2; b = 0; longLeft = (y1 != y2 && s01 < s12) || (y1 == y2 && s01 > s02); }
     else { m = 0; b = 2; longLeft = !(s01 < s12); }
   } else {
     t = 2;
-    if (y[0] < y[1]) { m = 0; b = 1; longLeft = s12 < s02; }
+    if (y0 < y1) { m = 0; b = 1; longLeft = s12 < s02; }
     else { m = 1; b = 0; longLeft = !(s12 < s02); }
   }
   int sTB = (t + b) == 1 ? s01 : (t + b) == 3 ? s12 : s02;
   int sTM = (t + m) == 1 ? s01 : (t + m) == 3 ? s12 : s02;
   int sMB = (m + b) == 1 ? s01 : (m + b) == 3 ? s12 : s02;
   // the top, middle and bottom corners' values
-  int xt = pick3(x, t), xm = pick3(x, m), yt = pick3(y, t), ym = pick3(y, m), yb = pick3(y, b), Ct = pick3(C, t);
-  vec2 ft = pick3(f, t);
-  float st = pick3(s, t);
+  int xt = pick3(x0, x1, x2, t), xm = pick3(x0, x1, x2, m), yt = pick3(y0, y1, y2, t), ym = pick3(y0, y1, y2, m);
+  int yb = pick3(y0, y1, y2, b), Ct = pick3(c0, c1, c2, t);
+  vec2 ft = pick3(f0, f1, f2, t);
+  float st = pick3(s0, s1, s2, t);
   // the colour: textured faces the client's int fixed point (<< 9) from float steps; plain faces a float palette index
-  float X0 = float(x[0]), X1 = float(x[1]), X2 = float(x[2]), Y0 = float(y[0]), Y1 = float(y[1]), Y2 = float(y[2]);
+  float X0 = float(x0), X1 = float(x1), X2 = float(x2), Y0 = float(y0), Y1 = float(y1), Y2 = float(y2);
   float fdet = float(det);
-  float dc1 = float(C[1] - C[0]), dc2 = float(C[2] - C[0]);
+  float dc1 = float(c1 - c0), dc2 = float(c2 - c0);
   precise float ax = dc1 * (Y2 - Y0) - dc2 * (Y1 - Y0);
   precise float ay = dc2 * (X1 - X0) - dc1 * (X2 - X0);
   ivec4 col = ivec4(sMB, 0, 0, 0);
@@ -216,9 +223,9 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   }
 
   // the depth key: steps from the unrounded corners, seeded at the top corner (the client's cj)
-  precise float kd = (f[1].x - f[0].x) * (f[2].y - f[0].y) - (f[2].x - f[0].x) * (f[1].y - f[0].y);
-  precise float kax = (s[1] - s[0]) * (f[2].y - f[0].y) - (s[2] - s[0]) * (f[1].y - f[0].y);
-  precise float kay = (s[2] - s[0]) * (f[1].x - f[0].x) - (s[1] - s[0]) * (f[2].x - f[0].x);
+  precise float kd = (f1.x - f0.x) * (f2.y - f0.y) - (f2.x - f0.x) * (f1.y - f0.y);
+  precise float kax = (s1 - s0) * (f2.y - f0.y) - (s2 - s0) * (f1.y - f0.y);
+  precise float kay = (s2 - s0) * (f1.x - f0.x) - (s1 - s0) * (f2.x - f0.x);
   float sx = fdiv(kax, kd), sy = fdiv(kay, kd);
   precise float key = st - sx * ft.x + sx;
   if (ft.y < 0.0) {
@@ -230,14 +237,14 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
 
   ivec4 rows = ivec4(yt, ym, yb, (longLeft ? 1 : 0) | flags);
   ivec4 edge = ivec4(xt, xm, sTB, sTM);
-  ivec4 tt2 = ivec4(t40, alpha, (flags & 2) != 0 ? C[0] & 127 : C[0], bias);  // w: the face's bias (the bias view)
+  ivec4 tt2 = ivec4(t40, alpha, (flags & 2) != 0 ? c0 & 127 : c0, bias);  // w: the face's bias (the bias view)
 
   // 1/z over the screen (the depth-buffer diagnostic and the old ground stopgap)
   vec3 iz = vec3(1.0 / max(zc.x, 1.0), 1.0 / max(zc.y, 1.0), 1.0 / max(zc.z, 1.0));
-  float dax = float(x[1] - x[0]), day = float(y[1] - y[0]), dbx = float(x[2] - x[0]), dby = float(y[2] - y[0]);
+  float dax = float(x1 - x0), day = float(y1 - y0), dbx = float(x2 - x0), dby = float(y2 - y0);
   float ad = iz.y - iz.x, bd = iz.z - iz.x;
   float dA = (ad * dby - bd * day) / fdet, dB = (bd * dax - ad * dbx) / fdet;
-  vec4 depth = vec4(dA, dB, iz.x - dA * float(x[0]) - dB * float(y[0]), 0.0);
+  vec4 depth = vec4(dA, dB, iz.x - dA * float(x0) - dB * float(y0), 0.0);
 
   r.rows = rows;
   r.edge = edge;
@@ -249,9 +256,52 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   r.key = keyF;
   r.depth = depth;
   r.box = box;
-  r.px = ivec3(x[0], x[1], x[2]);
-  r.py = ivec3(y[0], y[1], y[2]);
+  r.px = ivec3(x0, x1, x2);
+  r.py = ivec3(y0, y1, y2);
   return true;
+}
+
+// a point of a face cut by the near plane: its screen point, colour, depth key and camera depth
+struct Pt {
+  vec2 sp;
+  int sc;
+  float sk;
+  float sz;
+};
+
+// the n-th of four points set by selects (no array: kept in registers)
+void putPt(int n, Pt p, inout Pt q0, inout Pt q1, inout Pt q2, inout Pt q3) {
+  if (n == 0) {
+    q0 = p;
+  } else if (n == 1) {
+    q1 = p;
+  } else if (n == 2) {
+    q2 = p;
+  } else if (n == 3) {
+    q3 = p;
+  }
+}
+
+Pt cornerPt(corner k, int col, float key) {
+  Pt p;
+  p.sp = k.screen;
+  p.sc = col;
+  p.sk = key;
+  p.sz = k.cam.z;
+  return p;
+}
+
+// where the edge from an outside corner i to an inside corner o crosses z = 50 (the client's ints)
+Pt cutPt(ivec3 ci, ivec3 co, int coli, int colo, float keyCut) {
+  int fct = (65536 / (co.z - ci.z)) * (50 - ci.z);
+  int cx = ci.x + ((co.x - ci.x) * fct >> 16);
+  int cy = ci.y + ((co.y - ci.y) * fct >> 16);
+  Pt p;
+  p.sp = vec2(float(centerX + idiv(zoom * cx, 50)), float(centerY + idiv(zoom * cy, 50)));
+  p.sc = coli + ((colo - coli) * fct >> 16);
+  p.sk = keyCut;
+  p.sz = 50.0;
+  return p;
 }
 
 // A face: its three corners relative to the camera, their colour words (alpha << 24 | marks | colour), its texture's
@@ -259,86 +309,107 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
 // near plane can leave four corners): how many, in r0 and r1. The callers have already left out fully see-through faces
 // and those of other passes. full false: only how many (the record path's count), every decision made by the same
 // code (the corners, the facing tests, the near cut, coverage) and the rest of the setup left out; r0 and r1 unset.
-int setupFace(vec3 v[3], int ahsl[3], int texPlus1, int bias, vec3 tp[3], bool full, out Rec r0, out Rec r1) {
-  corner k[3];
-  int col[3];
-  bool cam = (ahsl[0] & 0x40000) != 0;
-  for (int i = 0; i < 3; i++) {
-    k[i] = toCorner(v[i], cam);
-    col[i] = ahsl[i] & 0xffff;
-  }
-  int alpha = (ahsl[0] >> 24) & 0xff;
+int setupFace(vec3 v0, vec3 v1, vec3 v2, int a0, int a1, int a2, int texPlus1, int bias, vec3 tp0, vec3 tp1, vec3 tp2, bool full, out Rec r0, out Rec r1) {
+  bool cam = (a0 & 0x40000) != 0;
+  corner k0 = toCorner(v0, cam);
+  corner k1 = toCorner(v1, cam);
+  corner k2 = toCorner(v2, cam);
+  int col0 = a0 & 0xffff, col1 = a1 & 0xffff, col2 = a2 & 0xffff;
+  int alpha = (a0 >> 24) & 0xff;
   float bias2 = float(bias * 2);
 
   int texId = texPlus1 - 1;
   int flags = 0;
   ivec4 t0 = ivec4(0), t1 = ivec4(0);
   int t40 = 0;
-  bool tile = (ahsl[0] & 0x100000) != 0;
+  bool tile = (a0 & 0x100000) != 0;
   if (full && texId >= 0) {
-    textureTerms(toCorner(tp[0], cam).ci, toCorner(tp[1], cam).ci, toCorner(tp[2], cam).ci, tile, t0, t1, t40);
+    textureTerms(toCorner(tp0, cam).ci, toCorner(tp1, cam).ci, toCorner(tp2, cam).ci, tile, t0, t1, t40);
     flags = 2 | (texId << 8);
   }
-  flags |= ((ahsl[0] >> 20) & 12) | (tile ? 16 : 0);  // 4 the ground, 8 never hidden by it, 16 a ground tile
+  flags |= ((a0 >> 20) & 12) | (tile ? 16 : 0);  // 4 the ground, 8 never hidden by it, 16 a ground tile
 
-  bool inside[3] = bool[3](k[0].cam.z >= 50.0, k[1].cam.z >= 50.0, k[2].cam.z >= 50.0);
-  float key[3] = float[3](0.0, 0.0, 0.0);
+  bool in0 = k0.cam.z >= 50.0, in1 = k1.cam.z >= 50.0, in2 = k2.cam.z >= 50.0;
+  float key0 = 0.0, key1 = 0.0, key2 = 0.0;
   if (full) {
-    for (int i = 0; i < 3; i++) {
-      precise float zb = k[i].cam.z - bias2;
-      key[i] = depthKey(zb);
-    }
+    precise float zb0 = k0.cam.z - bias2;
+    precise float zb1 = k1.cam.z - bias2;
+    precise float zb2 = k2.cam.z - bias2;
+    key0 = depthKey(zb0);
+    key1 = depthKey(zb1);
+    key2 = depthKey(zb2);
   }
-  if (inside[0] && inside[1] && inside[2]) {
+  if (in0 && in1 && in2) {
     // the client's test for a face turned away, on its float screen corners
-    precise float facing = (k[0].screen.x - k[1].screen.x) * (k[2].screen.y - k[1].screen.y) - (k[2].screen.x - k[1].screen.x) * (k[0].screen.y - k[1].screen.y);
+    precise float facing = (k0.screen.x - k1.screen.x) * (k2.screen.y - k1.screen.y) - (k2.screen.x - k1.screen.x) * (k0.screen.y - k1.screen.y);
     if (!(facing > 0.0)) return 0;
-    if (!full) return covers(k[0].screen, k[1].screen, k[2].screen) ? 1 : 0;
-    return setupTriangle(k[0].screen, k[1].screen, k[2].screen, col[0], col[1], col[2], key[0], key[1], key[2], vec3(k[0].cam.z, k[1].cam.z, k[2].cam.z), flags, t0, t1, t40, alpha, bias, r0) ? 1 : 0;
+    if (!full) return covers(k0.screen, k1.screen, k2.screen) ? 1 : 0;
+    return setupTriangle(k0.screen, k1.screen, k2.screen, col0, col1, col2, key0, key1, key2, vec3(k0.cam.z, k1.cam.z, k2.cam.z), flags, t0, t1, t40, alpha, bias, r0) ? 1 : 0;
   }
-  if (!inside[0] && !inside[1] && !inside[2]) return 0;
+  if (!in0 && !in1 && !in2) return 0;
 
   // a face across the plane z = 50: the client's test in camera space (its ints), then its cut at z = 50: each corner
   // in turn, an outside one giving where its edges to the previous and the next corner cross the plane
-  ivec3 c[3] = ivec3[3](k[0].ci, k[1].ci, k[2].ci);
-  int ax = c[0].x - c[1].x, bx = c[2].x - c[1].x, ay = c[0].y - c[1].y, by = c[2].y - c[1].y, az = c[0].z - c[1].z, bz = c[2].z - c[1].z;
+  ivec3 c0 = k0.ci, c1 = k1.ci, c2 = k2.ci;
+  int ax = c0.x - c1.x, bx = c2.x - c1.x, ay = c0.y - c1.y, by = c2.y - c1.y, az = c0.z - c1.z, bz = c2.z - c1.z;
   int nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-  if (!(c[1].x * nx + c[1].y * ny + c[1].z * nz > 0)) return 0;
-  vec2 sp[4];
-  int sc[4];
-  float sk[4];
-  float sz[4];
+  if (!(c1.x * nx + c1.y * ny + c1.z * nz > 0)) return 0;
+  float keyCut = full ? depthKey(50.0 - bias2) : 0.0;
+  Pt q0 = Pt(vec2(0.0), 0, 0.0, 0.0), q1 = q0, q2 = q0, q3 = q0;
   int n = 0;
-  for (int i = 0; i < 3; i++) {
-    if (inside[i]) {
-      sp[n] = k[i].screen; sc[n] = col[i]; sk[n] = key[i]; sz[n] = k[i].cam.z; n++;
-      continue;
+  // corner 0: its previous corner 2, its next 1
+  if (in0) {
+    putPt(n, cornerPt(k0, col0, key0), q0, q1, q2, q3);
+    n++;
+  } else {
+    if (in2 && n < 4) {
+      putPt(n, cutPt(c0, c2, col0, col2, keyCut), q0, q1, q2, q3);
+      n++;
     }
-    int nb[2] = int[2]((i + 2) % 3, (i + 1) % 3);
-    for (int j = 0; j < 2; j++) {
-      int o = nb[j];
-      if (!inside[o] || n >= 4) continue;
-      int fct = (65536 / (c[o].z - c[i].z)) * (50 - c[i].z);
-      int cx = c[i].x + ((c[o].x - c[i].x) * fct >> 16);
-      int cy = c[i].y + ((c[o].y - c[i].y) * fct >> 16);
-      sp[n] = vec2(float(centerX + idiv(zoom * cx, 50)), float(centerY + idiv(zoom * cy, 50)));
-      sc[n] = col[i] + ((col[o] - col[i]) * fct >> 16);
-      sk[n] = full ? depthKey(50.0 - bias2) : 0.0;
-      sz[n] = 50.0;
+    if (in1 && n < 4) {
+      putPt(n, cutPt(c0, c1, col0, col1, keyCut), q0, q1, q2, q3);
+      n++;
+    }
+  }
+  // corner 1: its previous 0, its next 2
+  if (in1) {
+    putPt(n, cornerPt(k1, col1, key1), q0, q1, q2, q3);
+    n++;
+  } else {
+    if (in0 && n < 4) {
+      putPt(n, cutPt(c1, c0, col1, col0, keyCut), q0, q1, q2, q3);
+      n++;
+    }
+    if (in2 && n < 4) {
+      putPt(n, cutPt(c1, c2, col1, col2, keyCut), q0, q1, q2, q3);
+      n++;
+    }
+  }
+  // corner 2: its previous 1, its next 0
+  if (in2) {
+    putPt(n, cornerPt(k2, col2, key2), q0, q1, q2, q3);
+    n++;
+  } else {
+    if (in1 && n < 4) {
+      putPt(n, cutPt(c2, c1, col2, col1, keyCut), q0, q1, q2, q3);
+      n++;
+    }
+    if (in0 && n < 4) {
+      putPt(n, cutPt(c2, c0, col2, col0, keyCut), q0, q1, q2, q3);
       n++;
     }
   }
   // the two triangles in the order the client draws them; whichever of them has something to draw, in that order
   if (!full) {
-    return (n >= 3 && covers(sp[0], sp[1], sp[2]) ? 1 : 0) + (n == 4 && covers(sp[0], sp[2], sp[3]) ? 1 : 0);
+    return (n >= 3 && covers(q0.sp, q1.sp, q2.sp) ? 1 : 0) + (n == 4 && covers(q0.sp, q2.sp, q3.sp) ? 1 : 0);
   }
   int count = 0;
-  if (n >= 3 && setupTriangle(sp[0], sp[1], sp[2], sc[0], sc[1], sc[2], sk[0], sk[1], sk[2], vec3(sz[0], sz[1], sz[2]), flags, t0, t1, t40, alpha, bias, r0)) {
+  if (n >= 3 && setupTriangle(q0.sp, q1.sp, q2.sp, q0.sc, q1.sc, q2.sc, q0.sk, q1.sk, q2.sk, vec3(q0.sz, q1.sz, q2.sz), flags, t0, t1, t40, alpha, bias, r0)) {
     count = 1;
   }
   if (n == 4) {
     Rec second;
-    if (setupTriangle(sp[0], sp[2], sp[3], sc[0], sc[2], sc[3], sk[0], sk[2], sk[3], vec3(sz[0], sz[2], sz[3]), flags, t0, t1, t40, alpha, bias, second)) {
+    if (setupTriangle(q0.sp, q2.sp, q3.sp, q0.sc, q2.sc, q3.sc, q0.sk, q2.sk, q3.sk, vec3(q0.sz, q2.sz, q3.sz), flags, t0, t1, t40, alpha, bias, second)) {
       if (count == 0) {
         r0 = second;
       } else {

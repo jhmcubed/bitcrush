@@ -327,29 +327,34 @@ void sort_priorities() {
   memoryBarrierShared();
   barrier();
   // this thread's comparators, of every stretch's numbered one after another: the t-th, t + THREAD_COUNT-th, ...;
-  // each kept as its stretch (bits 16 and up) and its number in it
+  // each kept as its stretch (bits 16 and up) and its number in it, -1 past the last stretch's. (11/19/2026: the q-th
+  // found for each q in turn, rather than added at a running count: an array indexed at run time is in the card's slow
+  // local memory, and a fixed loop over q is written out, so mine stays in registers. The same comparators.)
   int mine[FACES_PER_THREAD];
-  int nMine = 0, maxLog = 0;
-  {
-    int first = 0, i = t;
+  int maxLog = 0;
+  for (int p = 0; p < 18; ++p) {
+    maxLog = max(maxLog, stretchLog[p]);
+  }
+  for (int q = 0; q < FACES_PER_THREAD; ++q) {
+    int g = t + q * THREAD_COUNT, first = 0, found = -1;
     for (int p = 0; p < 18; ++p) {
       int lg = stretchLog[p];
-      if (lg == 0) {
-        continue;
-      }
-      maxLog = max(maxLog, lg);
-      int pairs = 1 << (lg - 1);
-      while (i < first + pairs && nMine < FACES_PER_THREAD) {
-        mine[nMine++] = p << 16 | (i - first);
-        i += THREAD_COUNT;
+      int pairs = lg == 0 ? 0 : 1 << (lg - 1);
+      if (g < first + pairs) {
+        found = p << 16 | (g - first);
+        break;
       }
       first += pairs;
     }
+    mine[q] = found;
   }
   for (int lk = 1; lk <= maxLog; ++lk) {
     // the flip: within each block of k = 2^lk, the i-th place against the i-th from the end
     int k = 1 << lk, hk = k >> 1;
-    for (int q = 0; q < nMine; ++q) {
+    for (int q = 0; q < FACES_PER_THREAD; ++q) {
+      if (mine[q] < 0) {
+        continue;
+      }
       int p = mine[q] >> 16, i = mine[q] & 0xffff;
       if (lk <= stretchLog[p]) {
         int a = ((i >> (lk - 1)) << lk) + (i & (hk - 1));
@@ -369,7 +374,10 @@ void sort_priorities() {
     // then the halves, quarters, ... within each block: j = k / 4 down to 1
     for (int lj = lk - 2; lj >= 0; --lj) {
       int j = 1 << lj;
-      for (int q = 0; q < nMine; ++q) {
+      for (int q = 0; q < FACES_PER_THREAD; ++q) {
+        if (mine[q] < 0) {
+          continue;
+        }
         int p = mine[q] >> 16, i = mine[q] & 0xffff;
         if (lk <= stretchLog[p]) {
           int a = ((i >> lj) << (lj + 1)) + (i & (j - 1));

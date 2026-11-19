@@ -124,12 +124,10 @@ int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
     uc = uvin[f * 3 + 2];
   }
 #endif
-  vec3 v[3] = vec3[3](a.pos, b.pos, c.pos);
-  int ah[3] = int[3](a.ahsl, b.ahsl, c.ahsl);
-  vec3 tp[3] = vec3[3](ua.yzw, ub.yzw, uc.yzw);
   // the texture's number + 1 and the face's bias, as vert.glsl reads them from the first corner's texture slot
   int tx = int(ua.x);
-  return setupFace(v, ah, tx & 511, (((tx >> 9) & 255) ^ 128) - 128, tp, full, r0, r1);  // the bias signed, as the CPU's
+  return setupFace(a.pos, b.pos, c.pos, a.ahsl, b.ahsl, c.ahsl, tx & 511, (((tx >> 9) & 255) ^ 128) - 128,  // the bias signed, as the CPU's
+    ua.yzw, ub.yzw, uc.yzw, full, r0, r1);
 }
 
 void main() {

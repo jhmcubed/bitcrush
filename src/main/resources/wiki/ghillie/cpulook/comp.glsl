@@ -25,6 +25,10 @@
 
 #include version_header
 
+// NVIDIA's compiler: write out every loop of a fixed length, so the arrays they index stay in registers rather than its
+// slow local memory (his card's binaries had them there, indexed at run time). Other drivers ignore it.
+#pragma optionNV(unroll all)
+
 #include thread_config
 #include cull_config
 

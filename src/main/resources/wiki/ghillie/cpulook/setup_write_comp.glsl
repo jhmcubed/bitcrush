@@ -26,6 +26,10 @@
 // The record path's write (setup_records.glsl says what): each record's face set up in full and written at its place.
 #include version_header
 
+// NVIDIA's compiler: write out every loop of a fixed length, so the arrays they index stay in registers rather than its
+// slow local memory (his card's binaries had them there, indexed at run time). Other drivers ignore it.
+#pragma optionNV(unroll all)
+
 #define WRITE_RECORDS
 #include write_config
 #include "setup_records.glsl"

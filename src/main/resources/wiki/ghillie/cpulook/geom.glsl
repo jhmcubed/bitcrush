@@ -124,11 +124,9 @@ void main() {
   // first in the order, where the CPU draws them): solid faces in one pass, then see-through ones over them
   if ((alphaPass == 1 && alpha > 0) || (alphaPass == 2 && alpha == 0)) return;
   if (alphaPass == 1 && painterPass != 0 && ((gAhsl[0] & 0x200000) != 0) != (painterPass == 2)) return;
-  vec3 v[3] = vec3[3](gVertex[0], gVertex[1], gVertex[2]);
-  int a[3] = int[3](gAhsl[0], gAhsl[1], gAhsl[2]);
-  vec3 tp[3] = vec3[3](gTexPos[0], gTexPos[1], gTexPos[2]);
   Rec r0, r1;
-  int n = setupFace(v, a, gTextureId[0], gBias[0], tp, true, r0, r1);
+  int n = setupFace(gVertex[0], gVertex[1], gVertex[2], gAhsl[0], gAhsl[1], gAhsl[2], gTextureId[0], gBias[0], gTexPos[0],
+    gTexPos[1], gTexPos[2], true, r0, r1);
   if (n >= 1) emitRec(r0);
   if (n >= 2) emitRec(r1);
 }

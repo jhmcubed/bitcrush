@@ -90,7 +90,8 @@ final class FastOrder
 	// the tile's renderables (and its bridge), read in the setup
 	private static final int RSTRIDE = 16;
 	private final Object[] refs = new Object[ALL * RSTRIDE];
-	private static final int R_GROUND = 0, R_W1 = 1, R_W2 = 2, R_D1 = 3, R_D2 = 4, R_G = 5, R_IM = 6, R_IT = 7, R_IB = 8, R_BRIDGE = 9;
+	private static final int R_GROUND = 0, R_W1 = 1, R_W2 = 2, R_D1 = 3, R_D2 = 4, R_G = 5, R_IM = 6, R_IT = 7, R_IB = 8, R_BRIDGE = 9,
+		R_WOBJ = 10, R_DOBJ = 11, R_GOBJ = 12, R_IL = 13, R_TILE = 14;
 	// whether a plane has a tile in view this frame (planes without one are skipped by the sweep: nothing there to do)
 	private final boolean[] planeUsed = new boolean[4];
 
@@ -117,9 +118,167 @@ final class FastOrder
 	// are in view), and the sweep
 	long setupNs, readNs, sweepNs;
 
+	// zone mode's temporary objects this frame (players, NPCs, projectiles, graphics: the client's drawTemp), put on the
+	// tiles under them as the CPU's own walk finds them; none in the old mode, where the tiles list them themselves
+	private GameObject[] temps = new GameObject[0];
+	private int nTemps;
+	private final int[] tempFirst = new int[ALL];
+	private int[] tempNext = new int[256], tempOf = new int[256], touched = new int[256];
+	private int nEntries, nTouched;
+
+	{
+		Arrays.fill(tempFirst, -1);
+	}
+
+	void setTemps(GameObject[] g, int count)
+	{
+		temps = g;
+		nTemps = g == null ? 0 : count;
+	}
+
+	// each temporary object on every tile of its footprint in this frame's square (its plane's)
+	private void placeTemps()
+	{
+		nEntries = nTouched = 0;
+		for (int t = 0; t < nTemps; t++)
+		{
+			GameObject g = temps[t];
+			if (g == null)
+			{
+				continue;
+			}
+			int p = g.getPlane();
+			if (p < 0 || p > 3)
+			{
+				continue;
+			}
+			Point a = g.getSceneMinLocation(), b = g.getSceneMaxLocation();
+			int sx = a != null ? a.getX() : g.getX() >> 7, sy = a != null ? a.getY() : g.getY() >> 7;
+			int ex = b != null ? b.getX() : sx, ey = b != null ? b.getY() : sy;
+			for (int x = Math.max(sx + OFFSET, xmin); x <= Math.min(ex + OFFSET, xmax - 1); x++)
+			{
+				for (int y = Math.max(sy + OFFSET, ymin); y <= Math.min(ey + OFFSET, ymax - 1); y++)
+				{
+					int i = (p * SIZE + x) * SIZE + y;
+					if (nEntries == tempNext.length)
+					{
+						tempNext = Arrays.copyOf(tempNext, nEntries * 2);
+						tempOf = Arrays.copyOf(tempOf, nEntries * 2);
+					}
+					if (tempFirst[i] < 0)
+					{
+						if (nTouched == touched.length)
+						{
+							touched = Arrays.copyOf(touched, nTouched * 2);
+						}
+						touched[nTouched++] = i;
+					}
+					tempOf[nEntries] = t;
+					tempNext[nEntries] = tempFirst[i];
+					tempFirst[i] = nEntries++;
+				}
+			}
+		}
+	}
+
+	private void clearTemps()
+	{
+		for (int k = 0; k < nTouched; k++)
+		{
+			tempFirst[touched[k]] = -1;
+		}
+		nTouched = 0;
+	}
+
+	// a game object on tile slot i (p, x, y): onto the tile's list; false when the slot is full
+	private boolean put(GameObject g, int p, int x, int y, int i)
+	{
+		int o = find(g, p, x, y, i);
+		int k = st[i * STRIDE + NOBJ];
+		for (int j = 0; j < k; j++)
+		{
+			if (st[i * STRIDE + OBJ + j] == o)
+			{
+				return true;  // listed by the tile already
+			}
+		}
+		if (k == PER_TILE)
+		{
+			return false;
+		}
+		st[i * STRIDE + OBJ + k] = o;
+		st[i * STRIDE + NOBJ] = k + 1;
+		st[i * STRIDE + MASK] |= mask(o, x, y);
+		return true;
+	}
+
 	Object[] keys = new Object[8192];
 	int[] kx = new int[8192], kz = new int[8192];
+	// each entry's source (its tile for the ground, its tile object, item layer or game object otherwise) and kind: the
+	// draw in full is worked out from them (draw), as the client's tile draw hands it over (stage B, B1)
+	Object[] ksrc = new Object[8192];
+	byte[] kkind = new byte[8192];
 	int n;
+
+	static final byte K_GROUND = 0, K_WALL1 = 1, K_WALL2 = 2, K_DECOR1 = 3, K_DECOR2 = 4, K_GOBJ = 5, K_ITEM = 6, K_OBJ = 7;
+
+	/**
+	 * Entry k as the client's tile draw hands it to a renderer (claude/cpu-look-stage-b.md, 5b; the client's getters read
+	 * the very fields its draw passes): into out its turn, x, height (less the renderable's animation height offset, as
+	 * the old path's draw call takes it) and z; the hash returned. The ground has none (-1 in out[0]).
+	 */
+	long draw(int k, int[] out)
+	{
+		final Object src = ksrc[k];
+		final net.runelite.api.Renderable r = keys[k] instanceof net.runelite.api.Renderable ? (net.runelite.api.Renderable) keys[k] : null;
+		final int lift = r != null ? r.getAnimationHeightOffset() : 0;
+		switch (kkind[k])
+		{
+			case K_WALL1:
+			case K_WALL2:
+			case K_GOBJ:
+			{
+				net.runelite.api.TileObject o = (net.runelite.api.TileObject) src;
+				out[0] = 0;
+				out[1] = o.getX();
+				out[2] = o.getZ() - lift;
+				out[3] = o.getY();
+				return o.getHash();
+			}
+			case K_DECOR1:
+			case K_DECOR2:
+			{
+				DecorativeObject d = (DecorativeObject) src;
+				boolean second = kkind[k] == K_DECOR2;
+				out[0] = 0;
+				out[1] = d.getX() + (second ? d.getXOffset2() : d.getXOffset());
+				out[2] = d.getZ() - lift;
+				out[3] = d.getY() + (second ? d.getYOffset2() : d.getYOffset());
+				return d.getHash();
+			}
+			case K_ITEM:
+			{
+				ItemLayer il = (ItemLayer) src;
+				out[0] = 0;
+				out[1] = il.getX();
+				out[2] = il.getZ() - il.getHeight() - lift;
+				out[3] = il.getY();
+				return il.getHash();
+			}
+			case K_OBJ:
+			{
+				GameObject g = (GameObject) src;
+				out[0] = g.getModelOrientation();
+				out[1] = g.getX();
+				out[2] = g.getZ() - lift;
+				out[3] = g.getY();
+				return g.getHash();
+			}
+			default:
+				out[0] = -1;
+				return 0;
+		}
+	}
 
 	void build(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible)
 	{
@@ -152,49 +311,18 @@ final class FastOrder
 		maxSteps = 64L * 4 * (xmax - xmin) * (ymax - ymin) + 100000;
 
 		java.util.Arrays.fill(planeUsed, false);
-		for (int p = 0; p < 4; p++)
+		placeTemps();
+		try
 		{
-			Tile[][] plane = p < tiles.length ? tiles[p] : null;
-			for (int x = xmin; x < xmax; x++)
+			if (!readTiles(tiles))
 			{
-				Tile[] column = plane != null ? plane[x] : null;
-				int i = (p * SIZE + x) * SIZE + ymin;
-				for (int y = ymin; y < ymax; y++, i++)
-				{
-					Tile tile = column != null ? column[y] : null;
-					tileAt[i] = tile;
-					if (tile == null)
-					{
-						fl[i] = 0;
-						continue;
-					}
-					final int b = i * STRIDE;
-					st[b + MASK] = st[b + EDGES] = st[b + EA] = st[b + EB] = st[b + LATE] = st[b + NOBJ] = 0;
-					fl[i] = EXISTS;
-					GameObject[] gos = tile.getGameObjects();
-					if (gos != null)
-					{
-						for (GameObject g : gos)
-						{
-							if (g == null)
-							{
-								continue;
-							}
-							int o = find(g, p, x, y, i);
-							int k = st[i * STRIDE + NOBJ];
-							if (k == PER_TILE)
-							{
-								overflowed = true;
-								return;
-							}
-							st[i * STRIDE + OBJ + k] = o;
-							st[i * STRIDE + NOBJ] = k + 1;
-							st[i * STRIDE + MASK] |= mask(o, x, y);
-						}
-					}
-					read(tile, i, b);
-				}
+				overflowed = true;
+				return;
 			}
+		}
+		finally
+		{
+			clearTemps();
 		}
 		final long tRead = System.nanoTime();
 		readNs = tRead - t0;
@@ -223,6 +351,53 @@ final class FastOrder
 		setupNs = t1 - t0;
 		sweep(minLevel, r);
 		sweepNs = System.nanoTime() - t1;
+	}
+
+	// every tile in the square into its slot: its objects (and the temporary ones on it), and what the sweep needs
+	private boolean readTiles(Tile[][][] tiles)
+	{
+		for (int p = 0; p < 4; p++)
+		{
+			Tile[][] plane = p < tiles.length ? tiles[p] : null;
+			for (int x = xmin; x < xmax; x++)
+			{
+				Tile[] column = plane != null ? plane[x] : null;
+				int i = (p * SIZE + x) * SIZE + ymin;
+				for (int y = ymin; y < ymax; y++, i++)
+				{
+					Tile tile = column != null ? column[y] : null;
+					tileAt[i] = tile;
+					if (tile == null)
+					{
+						fl[i] = 0;
+						continue;
+					}
+					final int b = i * STRIDE;
+					st[b + MASK] = st[b + EDGES] = st[b + EA] = st[b + EB] = st[b + LATE] = st[b + NOBJ] = 0;
+					fl[i] = EXISTS;
+					GameObject[] gos = tile.getGameObjects();
+					if (gos != null)
+					{
+						for (GameObject g : gos)
+						{
+							if (g != null && !put(g, p, x, y, i))
+							{
+								return false;
+							}
+						}
+					}
+					for (int e = tempFirst[i]; e >= 0; e = tempNext[e])
+					{
+						if (!put(temps[tempOf[e]], p, x, y, i))
+						{
+							return false;
+						}
+					}
+					read(tile, i, b);
+				}
+			}
+		}
+		return true;
 	}
 
 	private void sweep(int minLevel, int r)
@@ -303,6 +478,7 @@ final class FastOrder
 			st[b + WY] = w.getY();
 			refs[r + R_W1] = w.getRenderable1();
 			refs[r + R_W2] = w.getRenderable2();
+			refs[r + R_WOBJ] = w;
 		}
 		DecorativeObject d = tile.getDecorativeObject();
 		if (d != null)
@@ -312,6 +488,7 @@ final class FastOrder
 			st[b + DY] = d.getY();
 			refs[r + R_D1] = d.getRenderable();
 			refs[r + R_D2] = d.getRenderable2();
+			refs[r + R_DOBJ] = d;
 		}
 		GroundObject g = tile.getGroundObject();
 		if (g != null)
@@ -320,6 +497,7 @@ final class FastOrder
 			st[b + GX] = g.getX();
 			st[b + GY] = g.getY();
 			refs[r + R_G] = g.getRenderable();
+			refs[r + R_GOBJ] = g;
 		}
 		ItemLayer il = tile.getItemLayer();
 		if (il != null)
@@ -331,9 +509,11 @@ final class FastOrder
 			refs[r + R_IM] = il.getMiddle();
 			refs[r + R_IT] = il.getTop();
 			refs[r + R_IB] = il.getBottom();
+			refs[r + R_IL] = il;
 		}
 		Tile bridge = tile.getBridge();
 		refs[r + R_BRIDGE] = bridge;
+		refs[r + R_TILE] = tile;
 		if (bridge != null)
 		{
 			has |= H_BRIDGE;
@@ -475,7 +655,7 @@ final class FastOrder
 		return (x > oSx[o] ? 1 : 0) + (x < oEx[o] ? 4 : 0) + (y > oSy[o] ? 8 : 0) + (y < oEy[o] ? 2 : 0);
 	}
 
-	private void emit(Object key, int x, int z)
+	private void emit(Object key, int x, int z, Object src, byte kind)
 	{
 		if (key == null)
 		{
@@ -486,10 +666,14 @@ final class FastOrder
 			keys = Arrays.copyOf(keys, n * 2);
 			kx = Arrays.copyOf(kx, n * 2);
 			kz = Arrays.copyOf(kz, n * 2);
+			ksrc = Arrays.copyOf(ksrc, n * 2);
+			kkind = Arrays.copyOf(kkind, n * 2);
 		}
 		keys[n] = key;
 		kx[n] = x;
 		kz[n] = z;
+		ksrc[n] = src;
+		kkind[n] = kind;
 		n++;
 	}
 
@@ -566,7 +750,7 @@ final class FastOrder
 					final int b = t * STRIDE;
 					if ((st[b + HAS] & H_WALL) != 0)
 					{
-						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY]);
+						emit(refs[t * RSTRIDE + R_W1], st[b + WX], st[b + WY], refs[t * RSTRIDE + R_WOBJ], K_WALL1);
 					}
 					st[b + EDGES] = 0;
 				}
@@ -642,13 +826,13 @@ final class FastOrder
 		Object paint = tile.getSceneTilePaint();
 		if (paint != null)
 		{
-			emit(paint, lx, lz);
+			emit(paint, lx, lz, tile, K_GROUND);
 			return true;
 		}
 		Object model = tile.getSceneTileModel();
 		if (model != null)
 		{
-			emit(model, lx, lz);
+			emit(model, lx, lz, tile, K_GROUND);
 			return true;
 		}
 		return false;
@@ -665,7 +849,7 @@ final class FastOrder
 			WallObject bw = bridge.getWallObject();
 			if (bw != null)
 			{
-				emit(bw.getRenderable1(), bw.getX(), bw.getY());
+				emit(bw.getRenderable1(), bw.getX(), bw.getY(), bw, K_WALL1);
 			}
 			GameObject[] bos = bridge.getGameObjects();
 			if (bos != null)
@@ -674,7 +858,7 @@ final class FastOrder
 				{
 					if (g != null)
 					{
-						emit(g.getRenderable(), g.getX(), g.getY());
+						emit(g.getRenderable(), g.getX(), g.getY(), g, K_OBJ);
 					}
 				}
 			}
@@ -682,7 +866,7 @@ final class FastOrder
 		final boolean hasGround = (has & H_GROUND) != 0;
 		if (hasGround)
 		{
-			emit(refs[r + R_GROUND], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64);
+			emit(refs[r + R_GROUND], (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, refs[r + R_TILE], K_GROUND);
 		}
 
 		final boolean w = (has & H_WALL) != 0, d = (has & H_DECOR) != 0;
@@ -710,23 +894,23 @@ final class FastOrder
 			}
 			if ((a & firstMask) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY]);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1);
 			}
 			if ((st[b + WB] & firstMask) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY]);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2);
 			}
 		}
 		if (d)
 		{
-			emit(refs[r + R_D1], st[b + DX], st[b + DY]);
-			emit(refs[r + R_D2], st[b + DX], st[b + DY]);
+			emit(refs[r + R_D1], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR1);
+			emit(refs[r + R_D2], st[b + DX], st[b + DY], refs[r + R_DOBJ], K_DECOR2);
 		}
 		if (hasGround)
 		{
 			if ((has & H_GOBJ) != 0)
 			{
-				emit(refs[r + R_G], st[b + GX], st[b + GY]);
+				emit(refs[r + R_G], st[b + GX], st[b + GY], refs[r + R_GOBJ], K_GOBJ);
 			}
 			if ((has & H_ITEMS) != 0 && st[b + IH] == 0)
 			{
@@ -759,9 +943,9 @@ final class FastOrder
 	private void items(int t)
 	{
 		final int b = t * STRIDE, r = t * RSTRIDE;
-		emit(refs[r + R_IM], st[b + IX], st[b + IY]);
-		emit(refs[r + R_IT], st[b + IX], st[b + IY]);
-		emit(refs[r + R_IB], st[b + IX], st[b + IY]);
+		emit(refs[r + R_IM], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
+		emit(refs[r + R_IT], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
+		emit(refs[r + R_IB], st[b + IX], st[b + IY], refs[r + R_IL], K_ITEM);
 	}
 
 	private void objects(int t, int p, int x, int y)
@@ -832,7 +1016,7 @@ final class FastOrder
 				break;
 			}
 			oDrawn[best] = stamp;
-			emit(oR[best], oX[best], oY[best]);
+			emit(oR[best], oX[best], oY[best], oG[best], K_OBJ);
 			for (int fx = oSx[best]; fx <= oEx[best]; fx++)
 			{
 				for (int fy = oSy[best]; fy <= oEy[best]; fy++)
@@ -867,11 +1051,11 @@ final class FastOrder
 		{
 			if ((st[b + WB] & late) != 0)
 			{
-				emit(refs[r + R_W2], st[b + WX], st[b + WY]);
+				emit(refs[r + R_W2], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL2);
 			}
 			if ((st[b + WA] & late) != 0)
 			{
-				emit(refs[r + R_W1], st[b + WX], st[b + WY]);
+				emit(refs[r + R_W1], st[b + WX], st[b + WY], refs[r + R_WOBJ], K_WALL1);
 			}
 		}
 	}

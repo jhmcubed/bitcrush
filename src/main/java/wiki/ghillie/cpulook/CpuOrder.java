@@ -97,6 +97,50 @@ final class CpuOrder
 	private long steps, maxSteps;
 	boolean gaveUp;
 
+	// zone mode's temporary objects this frame (FastOrder.setTemps says what)
+	private GameObject[] temps = new GameObject[0];
+	private int nTemps;
+
+	void setTemps(GameObject[] g, int count)
+	{
+		temps = g;
+		nTemps = g == null ? 0 : count;
+	}
+
+	private O objectOf(GameObject g, int x, int y)
+	{
+		O o = objects.get(g);
+		if (o == null)
+		{
+			o = new O();
+			o.g = g;
+			Point a = g.getSceneMinLocation(), b = g.getSceneMaxLocation();
+			o.sx = (a != null ? a.getX() : x - OFFSET) + OFFSET;
+			o.sy = (a != null ? a.getY() : y - OFFSET) + OFFSET;
+			o.ex = (b != null ? b.getX() : x - OFFSET) + OFFSET;
+			o.ey = (b != null ? b.getY() : y - OFFSET) + OFFSET;
+			objects.put(g, o);
+		}
+		return o;
+	}
+
+	private void addObject(T t, O o)
+	{
+		for (int k = 0; k < t.nobjs; k++)
+		{
+			if (t.objs[k] == o)
+			{
+				return;
+			}
+		}
+		if (t.nobjs == t.objs.length)
+		{
+			t.objs = java.util.Arrays.copyOf(t.objs, t.nobjs * 2);
+		}
+		t.objs[t.nobjs++] = o;
+		t.objMask |= mask(o, t.x, t.y);
+	}
+
 	// the order
 	Object[] keys = new Object[8192];
 	int[] kx = new int[8192], kz = new int[8192];
@@ -161,18 +205,7 @@ final class CpuOrder
 							{
 								continue;
 							}
-							O o = objects.get(g);
-							if (o == null)
-							{
-								o = new O();
-								o.g = g;
-								Point a = g.getSceneMinLocation(), b = g.getSceneMaxLocation();
-								o.sx = (a != null ? a.getX() : x - OFFSET) + OFFSET;
-								o.sy = (a != null ? a.getY() : y - OFFSET) + OFFSET;
-								o.ex = (b != null ? b.getX() : x - OFFSET) + OFFSET;
-								o.ey = (b != null ? b.getY() : y - OFFSET) + OFFSET;
-								objects.put(g, o);
-							}
+							O o = objectOf(g, x, y);
 							if (t.nobjs == t.objs.length)
 							{
 								t.objs = java.util.Arrays.copyOf(t.objs, t.nobjs * 2);
@@ -186,6 +219,31 @@ final class CpuOrder
 					{
 						pending++;
 					}
+				}
+			}
+		}
+		// zone mode's temporary objects, on every tile of their footprint in the square (their plane's)
+		for (int k = 0; k < nTemps; k++)
+		{
+			GameObject g = temps[k];
+			if (g == null || g.getPlane() < 0 || g.getPlane() > 3)
+			{
+				continue;
+			}
+			Point a = g.getSceneMinLocation(), b = g.getSceneMaxLocation();
+			int sx = a != null ? a.getX() : g.getX() >> 7, sy = a != null ? a.getY() : g.getY() >> 7;
+			int ex = b != null ? b.getX() : sx, ey = b != null ? b.getY() : sy;
+			for (int x = Math.max(sx + OFFSET, xmin); x <= Math.min(ex + OFFSET, xmax - 1); x++)
+			{
+				for (int y = Math.max(sy + OFFSET, ymin); y <= Math.min(ey + OFFSET, ymax - 1); y++)
+				{
+					T t = grid[g.getPlane()][x][y];
+					if (t == null || t.tile == null)
+					{
+						continue;
+					}
+					addObject(t, objectOf(g, x, y));
+					t.objectsLeft = t.primary && t.nobjs > 0;
 				}
 			}
 		}

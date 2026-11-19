@@ -49,6 +49,7 @@ import net.runelite.api.Actor;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.api.Constants;
+import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.GraphicsObject;
 import net.runelite.api.GroundObject;
@@ -164,6 +165,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	@Inject
 	private PluginManager pluginManager;
+
+	// RuneLite's hooks for hiding tiles and objects (other plugins'): applied to zone mode's own draws, as RuneLite's zone
+	// plugin applies them
+	@Inject
+	private net.runelite.client.callback.RenderCallbackManager renderCallbackManager;
 
 	enum ComputeMode
 	{
@@ -371,6 +377,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private final WorldViewLog worldViewLog = new WorldViewLog();
 	private int orderChecks;
 	private boolean orderDiffWarned;
+	// stage B's B1 check (with the re-sort diagnostic): every draw the client hands over, in full, against the walk's
+	// own (FastOrder.draw), every 30th frame; the answer in the log at most every five seconds
+	private Object[] callR = new Object[8192];
+	private int[] callO = new int[8192], callX = new int[8192], callY = new int[8192], callZ = new int[8192];
+	private long[] callH = new long[8192];
+	private int calls;
+	private long lastFullCheckLog;
 	private Object[] drawKeys = new Object[4096];
 	private int[] drawX = new int[4096], drawZ = new int[4096], drawPos = new int[4096], drawLen = new int[4096], drawStart = new int[4096];
 	private GpuIntBuffer[] drawBuf = new GpuIntBuffer[4096];
@@ -424,6 +437,27 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private double cameraX, cameraY, cameraZ;
 	// the frame's camera turn in 16,384ths, as the uniforms carry it (the developer build's model dump)
 	private int cameraYawUnits, cameraPitchUnits;
+
+	// Stage B, zone mode (Diagnostics; claude/cpu-look-stage-b.md, 5b): the client in its zone mode (ZBUF), handing over
+	// only what moves (drawDynamic, drawTemp); the scene drawn from CPU Look's own walk, in the CPU's order, at
+	// postSceneDraw. Set when the plugin starts (the client's flag).
+	private boolean zoneMode;
+	private boolean zoneFrame;
+	private float frameYawSin, frameYawCos, framePitchSin, framePitchCos;
+	private int frameCamX, frameCamY, frameCamZ;
+	private int zoneLevel, zoneMaxLevel;
+	private java.util.Set<Integer> zoneHideRoofs = java.util.Collections.emptySet();
+	// this frame's dynamic objects (animated scenery), by renderable: the model the client made and its place
+	private final IdentityHashMap<Renderable, Integer> zoneDyn = new IdentityHashMap<>();
+	private Model[] dynModel = new Model[256];
+	private int[] dynO = new int[256], dynX = new int[256], dynY = new int[256], dynZ = new int[256];
+	private int dyns;
+	// this frame's temporary objects (players, NPCs, projectiles, graphics): their game objects, models and places
+	private final IdentityHashMap<GameObject, Integer> zoneTemp = new IdentityHashMap<>();
+	private GameObject[] tempG = new GameObject[256];
+	private Model[] tempM = new Model[256];
+	private int[] tempO = new int[256], tempX = new int[256], tempY = new int[256], tempZ = new int[256];
+	private int temps;
 	private double cameraYaw, cameraPitch;
 
 	private int viewportOffsetX;
@@ -578,9 +612,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				client.setDrawCallbacks(this);
 				// no HILLSKEW: the client bends scenery to its slope itself (the game's contourGround, every one of
 				// its ways), as it does for the CPU, instead of handing it over straight for the compute pass to bend
-				client.setGpuFlags(DrawCallbacks.GPU
-					| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
-				);
+				zoneMode = Build.DEVELOPER && config.zoneMode() && computeMode == ComputeMode.OPENGL;
+				client.setGpuFlags(gpuFlags());
 				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 
 				// force rebuild of main buffer provider to enable alpha channel
@@ -744,11 +777,18 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				log.debug("Toggle {}", configChanged.getKey());
 				// no HILLSKEW: the client bends scenery to its slope itself (the game's contourGround, every one of
 				// its ways), as it does for the CPU, instead of handing it over straight for the compute pass to bend
-				client.setGpuFlags(DrawCallbacks.GPU
-					| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
-				);
+				client.setGpuFlags(gpuFlags());
 			}
 		}
+	}
+
+	// the client's flags: GPU; vertex snapping off if asked; in zone mode ZBUF, with no render threads (CPU Look's
+	// uploads aren't made for several threads at once)
+	private int gpuFlags()
+	{
+		return DrawCallbacks.GPU
+			| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
+			| (zoneMode ? DrawCallbacks.ZBUF : 0);
 	}
 
 	private void setupSyncMode()
@@ -1371,6 +1411,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			timer.order(System.nanoTime() - orderStart, reference ? cpuOrder.n : fastOrder.n, fastOrder.readNs,
 				fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
 		}
+		if (!reference && orderChecks % 30 == 0)
+		{
+			fullCheck();
+		}
 		if (!reference && ++orderChecks % 30 == 0)
 		{
 			// the check: the reference walk on the same frame, entry for entry
@@ -1653,9 +1697,22 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		this.cameraX = camX;
 		this.cameraYawUnits = yaw;
 		this.cameraPitchUnits = pitch;
+		zoneFrame = zoneMode;
+		frameYawSin = (float) Math.sin(cameraYaw);
+		frameYawCos = (float) Math.cos(cameraYaw);
+		framePitchSin = (float) Math.sin(cameraPitch);
+		framePitchCos = (float) Math.cos(cameraPitch);
+		frameCamX = camX;
+		frameCamY = camY;
+		frameCamZ = camZ;
+		zoneDyn.clear();
+		zoneTemp.clear();
+		dyns = 0;
+		temps = 0;
 		this.cameraY = camY;
 		this.cameraZ = camZ;
 		draws = 0;
+		calls = 0;
 		// (the developer's diagnostics: never on in the Plugin Hub's build, Build.java)
 		groundHides = Build.DEVELOPER && config.groundHides() && !config.depthBuffer() && !config.cpuDepthTest();
 		painterModels = !config.playersByDepth();
@@ -1730,7 +1787,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			drawOrderLog.finish();
 		}
 
-		if (orderTest && draws > 1)
+		if (orderTest && draws > 1 && !zoneFrame)
 		{
 			try
 			{
@@ -1746,6 +1803,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 		}
 		draws = 0;
+		calls = 0;
 		frameStamp++;
 		anyVisible = false;
 
@@ -1939,6 +1997,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawScenePaint(Scene scene, SceneTilePaint paint, int plane, int tileX, int tileY)
 	{
+		if (zoneFrame)
+		{
+			return;  // zone mode: every tile's ground comes from CPU Look's own walk
+		}
 		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			worldViewLog.paint(scene);
@@ -1999,6 +2061,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawSceneTileModel(Scene scene, SceneTileModel model, int tileX, int tileY)
 	{
+		if (zoneFrame)
+		{
+			return;
+		}
 		if (Build.DEVELOPER && scene != null && scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			worldViewLog.tileModel(scene);
@@ -2677,7 +2743,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void swapScene(Scene scene)
 	{
-		if (computeMode == ComputeMode.NONE)
+		if (computeMode == ComputeMode.NONE || scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			return;
 		}
@@ -2701,6 +2767,270 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		nextSceneId = -1;
 
 		checkGLErrors();
+	}
+
+	// ---- zone mode (stage B): the client's zone callbacks ----
+
+	@Override
+	public void preSceneDraw(Scene scene, Projection entityProjection, float cameraX, float cameraY, float cameraZ,
+		float cameraPitch, float cameraYaw, int minLevel, int level, int maxLevel, java.util.Set<Integer> hideRoofIds)
+	{
+		if (scene.getWorldViewId() == WorldView.TOPLEVEL)
+		{
+			zoneLevel = level;
+			zoneMaxLevel = maxLevel;
+			zoneHideRoofs = hideRoofIds != null ? hideRoofIds : java.util.Collections.emptySet();
+		}
+	}
+
+	@Override
+	public void drawDynamic(int renderThreadId, Projection worldProjection, Scene scene, TileObject tileObject, Renderable r,
+		Model m, int orient, int x, int y, int z)
+	{
+		if (!zoneFrame || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+			|| !renderCallbackManager.drawObject(scene, tileObject))
+		{
+			return;
+		}
+		if (dyns == dynModel.length)
+		{
+			int k = dyns * 2;
+			dynModel = Arrays.copyOf(dynModel, k);
+			dynO = Arrays.copyOf(dynO, k);
+			dynX = Arrays.copyOf(dynX, k);
+			dynY = Arrays.copyOf(dynY, k);
+			dynZ = Arrays.copyOf(dynZ, k);
+		}
+		dynModel[dyns] = m;
+		dynO[dyns] = orient;
+		dynX[dyns] = x;
+		dynY[dyns] = y;
+		dynZ[dyns] = z;
+		zoneDyn.put(r, dyns++);
+	}
+
+	@Override
+	public void drawTemp(Projection worldProjection, Scene scene, GameObject gameObject, Model m, int orient, int x, int y, int z)
+	{
+		if (!zoneFrame || scene.getWorldViewId() != WorldView.TOPLEVEL || m == null
+			|| !renderCallbackManager.drawObject(scene, gameObject))
+		{
+			return;
+		}
+		if (temps == tempG.length)
+		{
+			int k = temps * 2;
+			tempG = Arrays.copyOf(tempG, k);
+			tempM = Arrays.copyOf(tempM, k);
+			tempO = Arrays.copyOf(tempO, k);
+			tempX = Arrays.copyOf(tempX, k);
+			tempY = Arrays.copyOf(tempY, k);
+			tempZ = Arrays.copyOf(tempZ, k);
+		}
+		tempG[temps] = gameObject;
+		tempM[temps] = m;
+		tempO[temps] = orient;
+		tempX[temps] = x;
+		tempY[temps] = y;
+		tempZ[temps] = z;
+		zoneTemp.put(gameObject, temps++);
+	}
+
+	@Override
+	public void postSceneDraw(Scene scene)
+	{
+		if (!zoneFrame || scene.getWorldViewId() != WorldView.TOPLEVEL)
+		{
+			return;
+		}
+		try
+		{
+			zoneDraw(scene);
+		}
+		catch (RuntimeException ex)
+		{
+			if (!zoneWarned)
+			{
+				log.warn("CPU Look's zone mode couldn't draw the frame", ex);
+				zoneWarned = true;
+			}
+		}
+		postDrawScene();
+	}
+
+	private boolean zoneWarned;
+
+	// The frame in zone mode: the CPU's order from CPU Look's own walk (the static scene from its tiles, this frame's
+	// temporary objects put on theirs), each draw in full from the client's getters (FastOrder.draw, checked against the
+	// old mode's draws by B1), dynamic objects' and temporary objects' models as the client made them this frame
+	private void zoneDraw(Scene scene)
+	{
+		final Tile[][][] tiles = scene.getExtendedTiles();
+		if (tiles == null)
+		{
+			return;
+		}
+		final int[][][] roofs = scene.getRoofs();
+		final boolean roofRemoval = scene.getRoofRemovalMode() != 0;
+		final int level = zoneLevel, maxLevel = zoneMaxLevel;
+		final java.util.Set<Integer> hide = zoneHideRoofs;
+		final float ps = framePitchSin, pc = framePitchCos, ys = frameYawSin, yc = frameYawCos;
+		final int cx = frameCamX, cy = frameCamY, cz = frameCamZ;
+		// which tiles the client would draw: its render level within the levels shown, a hidden roof's tiles left out,
+		// and the frustum (the old mode's tileInFrustum)
+		final CpuOrder.Visible visible = (p, x, y) ->
+		{
+			Tile t = tiles[p][x][y];
+			if (t == null)
+			{
+				return false;
+			}
+			int rl = t.getRenderLevel();
+			if (rl > maxLevel)
+			{
+				return false;
+			}
+			if (roofRemoval && level < rl && roofs != null)
+			{
+				int roof = roofs[level][x][y];
+				if (roof != 0 && hide.contains(roof))
+				{
+					return false;
+				}
+			}
+			return x > 0 && y > 0 && x < Constants.EXTENDED_SCENE_SIZE - 1 && y < Constants.EXTENDED_SCENE_SIZE - 1
+				&& inFrustum(scene, ps, pc, ys, yc, cx, cy, cz, p, x, y);
+		};
+		final int distance = getDrawDistance();
+		final long t0 = timing ? System.nanoTime() : 0;
+		fastOrder.setTemps(tempG, temps);
+		fastOrder.build(scene, cx, cz, distance, visible);
+		fastOrder.setTemps(null, 0);
+		final boolean reference = fastOrder.overflowed;
+		if (reference)
+		{
+			cpuOrder.setTemps(tempG, temps);
+			cpuOrder.build(scene, cx, cz, distance, visible);
+			cpuOrder.setTemps(null, 0);
+		}
+		if (timing)
+		{
+			timer.order(System.nanoTime() - t0, reference ? cpuOrder.n : fastOrder.n, fastOrder.readNs,
+				fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
+		}
+		if (reference)
+		{
+			// the reference walk keeps no sources: its entries drawn by what they are (rare: a tile with over 8 objects)
+			for (int k = 0; k < cpuOrder.n; k++)
+			{
+				zoneEntry(scene, cpuOrder.keys[k], null, (byte) -1, k, null);
+			}
+			return;
+		}
+		final int[] params = new int[4];
+		for (int k = 0; k < fastOrder.n; k++)
+		{
+			zoneEntry(scene, fastOrder.keys[k], fastOrder.ksrc[k], fastOrder.kkind[k], k, params);
+		}
+	}
+
+	// one entry of the walk, drawn as the old mode's callbacks would have drawn it
+	private void zoneEntry(Scene scene, Object key, Object src, byte kind, int k, int[] params)
+	{
+		final long t0 = timing ? System.nanoTime() : 0;
+		if (key instanceof SceneTilePaint || key instanceof SceneTileModel)
+		{
+			if (src instanceof Tile)
+			{
+				Tile tile = (Tile) src;
+				if (!renderCallbackManager.drawTile(scene, tile))
+				{
+					return;
+				}
+				net.runelite.api.Point loc = tile.getSceneLocation();
+				if (key instanceof SceneTilePaint)
+				{
+					drawScenePaint0(scene, (SceneTilePaint) key, tile.getPlane(), loc.getX(), loc.getY());
+				}
+				else
+				{
+					drawSceneTileModel0(scene, (SceneTileModel) key, loc.getX(), loc.getY());
+				}
+			}
+			if (timing)
+			{
+				timer.callback(t0);
+			}
+			return;
+		}
+		if (!(key instanceof Renderable))
+		{
+			return;
+		}
+		final Renderable r = (Renderable) key;
+		Model given = null;
+		int o, x, y, z;
+		long hash;
+		Integer temp = src instanceof GameObject ? zoneTemp.get(src) : null;
+		Integer dyn = temp == null ? zoneDyn.get(r) : null;
+		if (temp != null)
+		{
+			int i = temp;
+			given = tempM[i];
+			o = tempO[i];
+			x = tempX[i];
+			y = tempY[i];
+			z = tempZ[i];
+			hash = tempG[i].getHash();
+		}
+		else if (dyn != null)
+		{
+			int i = dyn;
+			given = dynModel[i];
+			o = dynO[i];
+			x = dynX[i];
+			y = dynY[i];
+			z = dynZ[i];
+			hash = src instanceof TileObject ? ((TileObject) src).getHash() : 0;
+		}
+		else if (r instanceof net.runelite.api.DynamicObject || params == null)
+		{
+			// an animated object the client didn't hand over this frame (out of its zones in view), or the reference
+			// walk's entry without its source: not drawn
+			return;
+		}
+		else
+		{
+			if (src instanceof TileObject && !renderCallbackManager.drawObject(scene, (TileObject) src))
+			{
+				return;
+			}
+			hash = fastOrder.draw(k, params);
+			if (params[0] < 0)
+			{
+				return;
+			}
+			o = params[0];
+			x = params[1];
+			y = params[2];
+			z = params[3];
+		}
+		final int before = targetBufferOffset;
+		drawnSeeThrough = false;
+		drawnPainter = false;
+		drawRenderable(null, scene, r, given, o, x, y, z, hash);
+		if (drawnSeeThrough && targetBufferOffset > before)
+		{
+			seeRange(before, targetBufferOffset - before);
+		}
+		if (drawnPainter && targetBufferOffset > before)
+		{
+			painterRange(before, targetBufferOffset - before);
+		}
+		if (timing)
+		{
+			timer.callback(t0);
+		}
 	}
 
 	@Override
@@ -2762,6 +3092,21 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	/**
 	 * Check is a model is visible and should be drawn.
 	 */
+	// the model's culling: by the projection the client handed over, or (zone mode's own draws) the frame's camera
+	private boolean visibleModel(Projection projection, Model model, int x, int y, int z)
+	{
+		if (projection instanceof IntProjection)
+		{
+			IntProjection p = (IntProjection) projection;
+			return isVisible(model, p.getPitchSin(), p.getPitchCos(), p.getYawSin(), p.getYawCos(), x - p.getCameraX(), y - p.getCameraY(), z - p.getCameraZ());
+		}
+		if (projection == null && zoneFrame)
+		{
+			return isVisible(model, framePitchSin, framePitchCos, frameYawSin, frameYawCos, x - frameCamX, y - frameCamY, z - frameCamZ);
+		}
+		return true;
+	}
+
 	private boolean isVisible(Model model, float pitchSin, float pitchCos, float yawSin, float yawCos, int x, int y, int z)
 	{
 		final int xzMag = model.getXYZMag();
@@ -2818,6 +3163,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void draw(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash)
 	{
+		if (zoneFrame)
+		{
+			return;  // zone mode: the scene comes from CPU Look's own walk
+		}
 		if (Build.DEVELOPER)
 		{
 			worldViewLog.draw(scene, projection, renderable, x, y, z);
@@ -2826,6 +3175,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		final int before = targetBufferOffset;
 		drawnSeeThrough = false;
 		drawnPainter = false;
+		if (orderTest)
+		{
+			recordCall(renderable, orientation, x, y, z, hash);
+		}
 		drawRenderable(projection, scene, renderable, orientation, x, y, z, hash);
 		if (drawnSeeThrough && targetBufferOffset > before)
 		{
@@ -2862,6 +3215,127 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glUniform1i(uniPainterPass, 0);
 	}
 
+	// stage B's B1 check: one draw as the client hands it over
+	private void recordCall(Renderable r, int orientation, int x, int y, int z, long hash)
+	{
+		if (calls == callR.length)
+		{
+			int m = calls * 2;
+			callR = Arrays.copyOf(callR, m);
+			callO = Arrays.copyOf(callO, m);
+			callX = Arrays.copyOf(callX, m);
+			callY = Arrays.copyOf(callY, m);
+			callZ = Arrays.copyOf(callZ, m);
+			callH = Arrays.copyOf(callH, m);
+		}
+		callR[calls] = r;
+		callO[calls] = orientation;
+		callX[calls] = x;
+		callY[calls] = y;
+		callZ[calls] = z;
+		callH[calls] = hash;
+		calls++;
+	}
+
+	// Stage B's B1 check (claude/cpu-look-stage-b.md, 5b): each draw the client handed over this frame against the walk's
+	// own working of it (FastOrder.draw, from the client's getters), matched by renderable: the same in full (turn, x,
+	// height, z, hash), or which part differs; draws the client handed over that the walk doesn't have (temporary
+	// objects off its tiles), and the walk's that the client didn't hand over. In the zone mode the walk's are all there is.
+	private void fullCheck()
+	{
+		final FastOrder fo = fastOrder;
+		final int n = fo.n;
+		final IdentityHashMap<Object, Integer> head = new IdentityHashMap<>();
+		final int[] next = new int[n];
+		final boolean[] claimed = new boolean[n];
+		int walkDraws = 0;
+		for (int k = n - 1; k >= 0; k--)
+		{
+			if (fo.kkind[k] == FastOrder.K_GROUND)
+			{
+				next[k] = -1;
+				continue;
+			}
+			walkDraws++;
+			Integer h = head.put(fo.keys[k], k);
+			next[k] = h != null ? h : -1;
+		}
+		final int[] p = new int[4];
+		int same = 0, dO = 0, dX = 0, dY = 0, dZ = 0, dH = 0, clientOnly = 0, walkOnly = 0;
+		String exDiff = null, exClient = null, exWalk = null;
+		for (int i = 0; i < calls; i++)
+		{
+			Integer h = head.get(callR[i]);
+			int match = -1, first = -1;
+			for (int k = h != null ? h : -1; k >= 0; k = next[k])
+			{
+				if (claimed[k])
+				{
+					continue;
+				}
+				if (first < 0)
+				{
+					first = k;
+				}
+				long hash = fo.draw(k, p);
+				if (p[0] == callO[i] && p[1] == callX[i] && p[2] == callY[i] && p[3] == callZ[i] && hash == callH[i])
+				{
+					match = k;
+					break;
+				}
+			}
+			if (match >= 0)
+			{
+				claimed[match] = true;
+				same++;
+				continue;
+			}
+			if (first < 0)
+			{
+				clientOnly++;
+				if (exClient == null)
+				{
+					exClient = String.format("%s turned %d at %d %d %d, hash %x", callR[i] == null ? "nothing" : callR[i].getClass().getSimpleName(),
+						callO[i], callX[i], callY[i], callZ[i], callH[i]);
+				}
+				continue;
+			}
+			claimed[first] = true;
+			long hash = fo.draw(first, p);
+			dO += p[0] != callO[i] ? 1 : 0;
+			dX += p[1] != callX[i] ? 1 : 0;
+			dY += p[2] != callY[i] ? 1 : 0;
+			dZ += p[3] != callZ[i] ? 1 : 0;
+			dH += hash != callH[i] ? 1 : 0;
+			if (exDiff == null)
+			{
+				exDiff = String.format("%s (kind %d): handed over turned %d at %d %d %d hash %x, the walk's turned %d at %d %d %d hash %x",
+					callR[i].getClass().getSimpleName(), fo.kkind[first], callO[i], callX[i], callY[i], callZ[i], callH[i],
+					p[0], p[1], p[2], p[3], hash);
+			}
+		}
+		for (int k = 0; k < n; k++)
+		{
+			if (fo.kkind[k] != FastOrder.K_GROUND && !claimed[k])
+			{
+				walkOnly++;
+				if (exWalk == null)
+				{
+					long hash = fo.draw(k, p);
+					exWalk = String.format("%s (kind %d) turned %d at %d %d %d, hash %x", fo.keys[k].getClass().getSimpleName(),
+						fo.kkind[k], p[0], p[1], p[2], p[3], hash);
+				}
+			}
+		}
+		final long now = System.nanoTime();
+		if (now - lastFullCheckLog > 5_000_000_000L)
+		{
+			lastFullCheckLog = now;
+			log.info("Bitcrush zone-mode check (B1): {} draws handed over, {} in the walk; the same in full {}; differing in turn {}, x {}, height {}, z {}, hash {} (first: {}); the client's alone {} (first: {}); the walk's alone {} (first: {})",
+				calls, walkDraws, same, dO, dX, dY, dZ, dH, exDiff, clientOnly, exClient, walkOnly, exWalk);
+		}
+	}
+
 	// a render mode 2 model's stretch of triangles (never joined to the last: each is drawn on its own)
 	private void painterRange(int first, int count)
 	{
@@ -2895,13 +3369,26 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	private void drawRenderable(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash)
 	{
+		drawRenderable(projection, scene, renderable, null, orientation, x, y, z, hash);
+	}
+
+	// given: the model the client already made for this draw (zone mode's dynamic and temporary objects), or null; no
+	// projection in zone mode's own draws: the frame's camera is used for the culling, and the client checks clickboxes
+	// itself there
+	private void drawRenderable(Projection projection, Scene scene, Renderable renderable, Model given, int orientation, int x, int y, int z, long hash)
+	{
 		if (drawOrderLog.recording())
 		{
 			drawOrderLog.draw(scene, renderable, x, y, z, hash);
 		}
 
 		Model model, offsetModel;
-		if (renderable instanceof Model)
+		if (given != null)
+		{
+			model = given;
+			offsetModel = given;
+		}
+		else if (renderable instanceof Model)
 		{
 			model = (Model) renderable;
 			offsetModel = model.getUnskewedModel();
@@ -2941,20 +3428,19 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 			model.calculateBoundsCylinder();
 
-			if (projection instanceof IntProjection)
+			if (!visibleModel(projection, model, x, y, z))
 			{
-				IntProjection p = (IntProjection) projection;
-				if (!isVisible(model, p.getPitchSin(), p.getPitchCos(), p.getYawSin(), p.getYawCos(), x - p.getCameraX(), y - p.getCameraY(), z - p.getCameraZ()))
+				if (drawOrderLog.recording())
 				{
-					if (drawOrderLog.recording())
-					{
-						drawOrderLog.skipped();
-					}
-					return;
+					drawOrderLog.skipped();
 				}
+				return;
 			}
 
-			client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			if (projection != null)
+			{
+				client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			}
 
 			int start = targetBufferOffset;
 			targetBufferOffset += sceneUploader.pushSortedModel(
@@ -2974,20 +3460,19 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 			model.calculateBoundsCylinder();
 
-			if (projection instanceof IntProjection)
+			if (!visibleModel(projection, model, x, y, z))
 			{
-				IntProjection p = (IntProjection) projection;
-				if (!isVisible(model, p.getPitchSin(), p.getPitchCos(), p.getYawSin(), p.getYawCos(), x - p.getCameraX(), y - p.getCameraY(), z - p.getCameraZ()))
+				if (drawOrderLog.recording())
 				{
-					if (drawOrderLog.recording())
-					{
-						drawOrderLog.skipped();
-					}
-					return;
+					drawOrderLog.skipped();
 				}
+				return;
 			}
 
-			client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			if (projection != null)
+			{
+				client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			}
 
 			int tc = Math.min(MAX_TRIANGLE, offsetModel.getFaceCount());
 			int uvOffset = offsetModel.getUvBufferOffset();
@@ -3023,20 +3508,19 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 			model.calculateBoundsCylinder();
 
-			if (projection instanceof IntProjection)
+			if (!visibleModel(projection, model, x, y, z))
 			{
-				IntProjection p = (IntProjection) projection;
-				if (!isVisible(model, p.getPitchSin(), p.getPitchCos(), p.getYawSin(), p.getYawCos(), x - p.getCameraX(), y - p.getCameraY(), z - p.getCameraZ()))
+				if (drawOrderLog.recording())
 				{
-					if (drawOrderLog.recording())
-					{
-						drawOrderLog.skipped();
-					}
-					return;
+					drawOrderLog.skipped();
 				}
+				return;
 			}
 
-			client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			if (projection != null)
+			{
+				client.checkClickbox(projection, model, orientation, x, y, z, hash);
+			}
 
 			// texture slots for textures, and for the faces' bias (SceneUploader.hasUv)
 			boolean hasUv = SceneUploader.hasUv(model);

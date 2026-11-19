@@ -230,6 +230,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "zoneMode",
+		name = "Zone mode (stage B)",
+		description = "Stage B (claude/cpu-look-stage-b.md): the client in its zone mode, which hands a renderer only what moves, and CPU Look drawing the scene from its own walk, in the CPU's order. Turn the plugin off and on after changing it. With compute shaders on only.",
+		position = 44,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean zoneMode()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

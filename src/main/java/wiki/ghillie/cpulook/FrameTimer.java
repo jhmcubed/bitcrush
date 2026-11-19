@@ -98,6 +98,8 @@ class FrameTimer
 	private int frames;
 	private long draws, triangles;
 	private final long[] models = new long[TIERS.length], faces = new long[TIERS.length];
+	// of them, the models drawn in their faces' own order, which skip the sort (FACE_ORDER, 11/19/2026)
+	private final long[] ordered = new long[TIERS.length];
 	private int modelFrames;
 	private boolean tickSeen;
 	private long recordsSolid, recordsSee;
@@ -172,12 +174,13 @@ class FrameTimer
 	}
 
 	// the compute pass's models and their faces by workgroup size this frame (TIERS' order)
-	void tiers(int[] tierModels, int[] tierFaces)
+	void tiers(int[] tierModels, int[] tierFaces, int[] tierOrdered)
 	{
 		for (int i = 0; i < TIERS.length; i++)
 		{
 			models[i] += tierModels[i];
 			faces[i] += tierFaces[i];
+			ordered[i] += tierOrdered[i];
 		}
 		modelFrames++;
 	}
@@ -439,8 +442,9 @@ class FrameTimer
 	// a tier's time, its models and faces a frame
 	private String tier(int t)
 	{
-		return String.format("%s %s for %.0f models, %.0f faces", TIERS[t], gpu(t),
-			modelFrames > 0 ? models[t] / (double) modelFrames : 0, modelFrames > 0 ? faces[t] / (double) modelFrames : 0);
+		final double n = modelFrames > 0 ? models[t] / (double) modelFrames : 0, o = modelFrames > 0 ? ordered[t] / (double) modelFrames : 0;
+		return String.format("%s %s for %.0f models%s, %.0f faces", TIERS[t], gpu(t), n,
+			t > 0 && n > 0 ? String.format(" (%.0f in their faces' order, unsorted)", o) : "", modelFrames > 0 ? faces[t] / (double) modelFrames : 0);
 	}
 
 	private long gcCount()
@@ -520,6 +524,7 @@ class FrameTimer
 		draws = triangles = 0;
 		Arrays.fill(models, 0);
 		Arrays.fill(faces, 0);
+		Arrays.fill(ordered, 0);
 		modelFrames = 0;
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;
@@ -621,6 +626,7 @@ class FrameTimer
 		draws = triangles = 0;
 		Arrays.fill(models, 0);
 		Arrays.fill(faces, 0);
+		Arrays.fill(ordered, 0);
 		modelFrames = 0;
 		recordsSolid = recordsSee = 0;
 		recordReads = 0;

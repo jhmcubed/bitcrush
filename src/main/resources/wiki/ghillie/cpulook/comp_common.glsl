@@ -29,6 +29,11 @@
 // turned by the client's own float matrix on the processor (BoatMath), so neither the compute pass nor the setup turns
 // them; y holds the model origin's (int) camera depth for the face depths
 #define CAM_SPACE (1 << 23)
+// a model's flag (bit 22, 11/19/2026): drawn in its faces' own order, so the compute pass needn't sort it (comp.glsl).
+// The CPU draws a model that isn't render mode 2 solid faces first, in their order, and see-through faces after by
+// depth (face_key); one with no see-through face at all is then simply in its faces' order: CpuLookPlugin sets this
+// for a model with no transparency of its own or per face that isn't render mode 2
+#define FACE_ORDER (1 << 22)
 
 layout(std140) uniform uniforms {
   float cameraYaw;

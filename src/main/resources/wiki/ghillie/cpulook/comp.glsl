@@ -49,6 +49,17 @@ void main() {
   modelinfo minfo = ol[groupId];
   ivec4 pos = ivec4(minfo.x, minfo.y, minfo.z, 0);
 
+  if ((minfo.flags & FACE_ORDER) != 0) {
+    // a model drawn in its faces' own order (FACE_ORDER): each face straight to its place, no keys, no sort (the same
+    // for the whole workgroup, so none of the barriers below is skipped by some threads and not others)
+    for (int i = 0; i < FACES_PER_THREAD; i++) {
+      if (localId + i < minfo.size) {
+        write_face(localId + i, minfo, int(localId) + i);
+      }
+    }
+    return;
+  }
+
   if (localId == 0) {
     min10 = 6000;
     for (int i = 0; i < 12; ++i) {

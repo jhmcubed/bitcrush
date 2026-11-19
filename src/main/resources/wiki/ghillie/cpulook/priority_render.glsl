@@ -311,26 +311,58 @@ bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam) {
 // (kept behind COUNTING_SORT for ShaderCheck to compare), in far fewer steps: each face then finds its place with a
 // binary search (sort_and_insert) instead of comparing itself with every other face of its priority (11/18/2026: the
 // count made the compute pass the card's largest cost zoomed out).
+// Every stretch at once (11/19/2026: a player's faces spread over many priorities, and their networks ran one after
+// another, each with its own barriers: his on board, the 1024 x 4 tier 0.30 ms for 2 models). The stretches are
+// apart in renderPris, so their comparators never touch: each step of the network now runs every stretch long enough
+// to have it, and the workgroup waits at a barrier once a step, the longest stretch's steps in all. Each thread takes
+// the stretches' comparators in turn (fewer than its faces: a stretch has under twice its length in places, half that
+// in comparators), and works out each one's places with shifts (the block sizes are powers of two).
+shared int stretchBase[18], stretchN[18], stretchLog[18];
+
 void sort_priorities() {
   int t = int(gl_LocalInvocationID.x);
-  for (int p = 0; p < 18; ++p) {
-    int n = totalMappedNum[p];
-    if (n < 2) {
-      continue;
+  if (t < 18) {
+    int n = totalMappedNum[t];
+    int lg = 0;
+    while ((1 << lg) < n) {
+      lg++;
     }
-    int base = count_prio_offset(p);
-    int size = 2;
-    while (size < n) {
-      size <<= 1;
+    stretchBase[t] = count_prio_offset(t);
+    stretchN[t] = n;
+    stretchLog[t] = n < 2 ? 0 : lg;
+  }
+  memoryBarrierShared();
+  barrier();
+  // this thread's comparators, of every stretch's numbered one after another: the t-th, t + THREAD_COUNT-th, ...;
+  // each kept as its stretch (bits 16 and up) and its number in it
+  int mine[FACES_PER_THREAD];
+  int nMine = 0, maxLog = 0;
+  {
+    int first = 0, i = t;
+    for (int p = 0; p < 18; ++p) {
+      int lg = stretchLog[p];
+      if (lg == 0) {
+        continue;
+      }
+      maxLog = max(maxLog, lg);
+      int pairs = 1 << (lg - 1);
+      while (i < first + pairs && nMine < FACES_PER_THREAD) {
+        mine[nMine++] = p << 16 | (i - first);
+        i += THREAD_COUNT;
+      }
+      first += pairs;
     }
-    int pairs = size >> 1;
-    for (int k = 2; k <= size; k <<= 1) {
-      // the flip: within each block of k, the i-th place against the i-th from the end
-      int hk = k >> 1;
-      for (int i = t; i < pairs; i += THREAD_COUNT) {
-        int a = (i / hk) * k + (i % hk);
-        int b = (i / hk) * k + k - 1 - (i % hk);
-        if (b < n) {
+  }
+  for (int lk = 1; lk <= maxLog; ++lk) {
+    // the flip: within each block of k = 2^lk, the i-th place against the i-th from the end
+    int k = 1 << lk, hk = k >> 1;
+    for (int q = 0; q < nMine; ++q) {
+      int p = mine[q] >> 16, i = mine[q] & 0xffff;
+      if (lk <= stretchLog[p]) {
+        int a = ((i >> (lk - 1)) << lk) + (i & (hk - 1));
+        int b = ((i >> (lk - 1)) << lk) + k - 1 - (i & (hk - 1));
+        if (b < stretchN[p]) {
+          int base = stretchBase[p];
           int x = renderPris[base + a], y = renderPris[base + b];
           if (y > x) {
             renderPris[base + a] = y;
@@ -338,14 +370,19 @@ void sort_priorities() {
           }
         }
       }
-      memoryBarrierShared();
-      barrier();
-      // then the halves, quarters, ... within each block
-      for (int j = k >> 2; j > 0; j >>= 1) {
-        for (int i = t; i < pairs; i += THREAD_COUNT) {
-          int a = (i / j) * 2 * j + (i % j);
+    }
+    memoryBarrierShared();
+    barrier();
+    // then the halves, quarters, ... within each block: j = k / 4 down to 1
+    for (int lj = lk - 2; lj >= 0; --lj) {
+      int j = 1 << lj;
+      for (int q = 0; q < nMine; ++q) {
+        int p = mine[q] >> 16, i = mine[q] & 0xffff;
+        if (lk <= stretchLog[p]) {
+          int a = ((i >> lj) << (lj + 1)) + (i & (j - 1));
           int b = a + j;
-          if (b < n) {
+          if (b < stretchN[p]) {
+            int base = stretchBase[p];
             int x = renderPris[base + a], y = renderPris[base + b];
             if (y > x) {
               renderPris[base + a] = y;
@@ -353,24 +390,20 @@ void sort_priorities() {
             }
           }
         }
-        memoryBarrierShared();
-        barrier();
       }
+      memoryBarrierShared();
+      barrier();
     }
   }
 }
 #endif
 
+void write_face(uint localId, modelinfo minfo, int myOffset);
+
 void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDistance) {
   int size = minfo.size;
 
   if (localId < size) {
-    vert thisrvA, thisrvB, thisrvC;
-    load_face(localId, minfo, thisrvA, thisrvB, thisrvC);
-    int outOffset = minfo.idx;
-    int toffset = minfo.toffset;
-    int flags = minfo.flags;
-
     // we only have to order faces against others of the same priority
     const int priorityOffset = count_prio_offset(thisPriority);
     const int numOfPriority = totalMappedNum[thisPriority];
@@ -399,6 +432,19 @@ void sort_and_insert(uint localId, modelinfo minfo, int thisPriority, int thisDi
     }
     myOffset = lo;
 #endif
+    write_face(localId, minfo, myOffset);
+  }
+}
+
+// A face written at its place in the model's order (sort_and_insert's, or its own number for a model drawn in its
+// faces' order: comp.glsl's FACE_ORDER)
+void write_face(uint localId, modelinfo minfo, int myOffset) {
+  {
+    vert thisrvA, thisrvB, thisrvC;
+    load_face(localId, minfo, thisrvA, thisrvB, thisrvC);
+    int outOffset = minfo.idx;
+    int toffset = minfo.toffset;
+    int flags = minfo.flags;
 
     // the CPU look: each corner relative to the camera (the object's place less the camera's, ints, added to the
     // turned corner in floats, as the client adds them); the geometry stage turns it by the camera

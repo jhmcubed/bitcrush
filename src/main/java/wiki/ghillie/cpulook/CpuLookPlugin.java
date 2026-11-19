@@ -135,6 +135,14 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	// (BoatMath); the shaders' CAM_SPACE, their corners marked 0x40000 for the setup, the record's y the model origin's
 	// depth
 	static final int FLAG_CAM = 1 << 23;
+	// a model drawn in its faces' own order (11/19/2026): no transparency of its own or per face and not render mode 2,
+	// so the CPU draws its faces by number and the compute pass skips the sort for it (comp_common.glsl's FACE_ORDER)
+	static final int FLAG_ORDER = 1 << 22;
+
+	static int faceOrder(Model m, boolean painter)
+	{
+		return !painter && m.getFaceTransparencies() == null && m.getTransparency() == 0 ? FLAG_ORDER : 0;
+	}
 	// zoneEntry's draw of such an entry in full (drawRenderable's flags)
 	private boolean drawSolidOnly;
 	private static final int MARK_PAINTER = 0x200000;
@@ -288,7 +296,20 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private final GpuIntBuffer[] modelBufferBig = new GpuIntBuffer[BIG_TIERS.length];
 	private final int[] bigModels = new int[BIG_TIERS.length];
 	// each tier's models and faces this frame, for the frame timings (FrameTimer.TIERS' order)
-	private final int[] tierModels = new int[FrameTimer.TIERS.length], tierFaces = new int[FrameTimer.TIERS.length];
+	private final int[] tierModels = new int[FrameTimer.TIERS.length], tierFaces = new int[FrameTimer.TIERS.length],
+		tierOrdered = new int[FrameTimer.TIERS.length];
+
+	// a model list's models in their faces' own order (its eight ints a model, the flags fifth), as flipped for upload
+	private static int ordered(GpuIntBuffer b)
+	{
+		final IntBuffer ib = b.getBuffer();
+		int n = 0;
+		for (int i = 4, end = ib.limit(); i < end; i += 8)
+		{
+			n += (ib.get(i) & FLAG_ORDER) != 0 ? 1 : 0;
+		}
+		return n;
+	}
 	private int glUnorderedComputeProgram;
 	private int glUiProgram;
 
@@ -2157,7 +2178,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				tierModels[4 + i] = bigModels[i];
 			}
 			tierModels[7] = largeModels;
-			timer.tiers(tierModels, tierFaces);
+			// of each, the models in their faces' own order (FLAG_ORDER), counted in the lists as uploaded
+			tierOrdered[1] = ordered(this.modelBufferSmall);
+			tierOrdered[2] = ordered(this.modelBufferTiny);
+			tierOrdered[3] = ordered(this.modelBufferMid);
+			for (int i = 0; i < BIG_TIERS.length; i++)
+			{
+				tierOrdered[4 + i] = ordered(this.modelBufferBig[i]);
+			}
+			tierOrdered[7] = ordered(this.modelBuffer);
+			timer.tiers(tierModels, tierFaces, tierOrdered);
 			timer.mark(FrameTimer.COMPUTE_START);
 		}
 
@@ -3249,7 +3279,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		s.uvOff[i] = hasUv ? s.uv : -1;
 		s.len[i] = len;
 		s.flags[i] = FLAG_CAM | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
-			| (solidOnly ? FLAG_SOLID : 0);
+			| (solidOnly ? FLAG_SOLID : 0) | faceOrder(model, painter);
 		s.x[i] = 0;
 		s.y[i] = BoatMath.originDepth(s.mat);
 		s.z[i] = 0;
@@ -3803,7 +3833,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		s.off[i] = s.v;
 		s.uvOff[i] = hasUv ? s.uv : -1;
 		s.len[i] = len;
-		s.flags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0);
+		s.flags[i] = orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
+			| faceOrder(model, painter);
 		s.x[i] = x;
 		s.y[i] = y;
 		s.z[i] = z;
@@ -4825,7 +4856,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at + 1] = offsetModel.getUvBufferOffset();
 		out[at + 2] = Math.min(MAX_TRIANGLE, offsetModel.getFaceCount());
 		out[at + 3] = FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | params[0]
-			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0) | (solid ? FLAG_SOLID : 0);
+			| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0) | (solid ? FLAG_SOLID : 0)
+			| faceOrder(offsetModel, painter);
 		out[at + 4] = x;
 		out[at + 5] = y;
 		out[at + 6] = z;
@@ -4961,7 +4993,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		out[at + 1] = hasUv ? 1 : 0;
 		out[at + 2] = 0;
 		out[at + 3] = params[0] | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
-			| ((kind & FastOrder.K_SOLID) != 0 ? FLAG_SOLID : 0);
+			| ((kind & FastOrder.K_SOLID) != 0 ? FLAG_SOLID : 0) | faceOrder(still, painter);
 		out[at + 4] = x;
 		out[at + 5] = y;
 		out[at + 6] = z;
@@ -5932,7 +5964,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			int m = markOf(scene, renderable, x, z, hash);
 			buffer.put(FLAG_SCENE_BUFFER | (hillskew ? (1 << 26) : 0) | (plane << 24) | orientation
 				| (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
-				| (drawSolidOnly ? FLAG_SOLID : 0));
+				| (drawSolidOnly ? FLAG_SOLID : 0) | faceOrder(offsetModel, painter));
 			buffer.put(x).put(y).put(z);
 
 			targetBufferOffset += tc * 3;
@@ -5980,7 +6012,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			buffer.put(targetBufferOffset);
 			int m = markOf(scene, renderable, x, z, hash);
 			buffer.put(orientation | (m == MARK_FREE ? FLAG_FREE : m == MARK_GROUND ? FLAG_GROUND : 0) | (painter ? FLAG_PAINTER : 0)
-				| (drawSolidOnly ? FLAG_SOLID : 0));
+				| (drawSolidOnly ? FLAG_SOLID : 0) | faceOrder(model, painter));
 			buffer.put(x).put(y).put(z);
 			noteDraw(renderable, x, z, b, pos, len, -1);
 

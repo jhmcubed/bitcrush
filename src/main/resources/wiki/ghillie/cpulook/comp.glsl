@@ -25,12 +25,29 @@
 
 #include version_header
 
-// NVIDIA's compiler: write out every loop of a fixed length, so the arrays they index stay in registers rather than its
-// slow local memory (his card's binaries had them there, indexed at run time). Other drivers ignore it.
-#pragma optionNV(unroll all)
-
 #include thread_config
 #include cull_config
+
+// A thread's faces' values are kept in arrays through the barriers, read and set at a face's number i by selects:
+// every index a constant, so the arrays stay in registers. (11/19/2026, his card's compiled programs: an array indexed
+// by a variable sits in the card's slow local memory, and asking its compiler to write every loop out, as the record
+// setup does, left the loops with the most work in them rolled and copied the rest: the 1024 x 4 tier's program over
+// three times the size and slower.) a and i are names or simple expressions, v a name: each is written several times.
+#if FACES_PER_THREAD == 1
+#define PICK(a, i) (a[0])
+#define PUT(a, i, v) { a[0] = (v); }
+#elif FACES_PER_THREAD == 2
+#define PICK(a, i) ((i) == 1 ? a[1] : a[0])
+#define PUT(a, i, v) { a[0] = (i) == 0 ? (v) : a[0]; a[1] = (i) == 1 ? (v) : a[1]; }
+#elif FACES_PER_THREAD == 4
+#define PICK(a, i) ((i) == 3 ? a[3] : (i) == 2 ? a[2] : (i) == 1 ? a[1] : a[0])
+#define PUT(a, i, v) { a[0] = (i) == 0 ? (v) : a[0]; a[1] = (i) == 1 ? (v) : a[1]; a[2] = (i) == 2 ? (v) : a[2]; a[3] = (i) == 3 ? (v) : a[3]; }
+#elif FACES_PER_THREAD == 6
+#define PICK(a, i) ((i) == 5 ? a[5] : (i) == 4 ? a[4] : (i) == 3 ? a[3] : (i) == 2 ? a[2] : (i) == 1 ? a[1] : a[0])
+#define PUT(a, i, v) { a[0] = (i) == 0 ? (v) : a[0]; a[1] = (i) == 1 ? (v) : a[1]; a[2] = (i) == 2 ? (v) : a[2]; a[3] = (i) == 3 ? (v) : a[3]; a[4] = (i) == 4 ? (v) : a[4]; a[5] = (i) == 5 ? (v) : a[5]; }
+#else
+#error FACES_PER_THREAD is 1, 2, 4 or 6 (PICK and PUT)
+#endif
 
 shared int totalNum[12];       // number of faces with a given priority
 shared int totalDistance[12];  // sum of distances to faces of a given priority
@@ -89,7 +106,12 @@ void main() {
   bool vis[FACES_PER_THREAD];
 
   for (int i = 0; i < FACES_PER_THREAD; i++) {
-    face_key(localId + i, minfo, prio[i], dis[i], vis[i]);
+    int p, d;
+    bool v;
+    face_key(localId + i, minfo, p, d, v);
+    PUT(prio, i, p);
+    PUT(dis, i, d);
+    PUT(vis, i, v);
   }
 
   int prioAdj[FACES_PER_THREAD];
@@ -98,9 +120,10 @@ void main() {
     // stretch in the same order whatever order the keys start in, as every key is different (the face number is in
     // it), so every face lands where the counters' places would have put it
     for (int i = 0; i < FACES_PER_THREAD; i++) {
-      prioAdj[i] = 2;
+      int two = 2;
+      PUT(prioAdj, i, two);
       if (localId + i < minfo.size) {
-        renderPris[localId + i] = dis[i] << 16 | int(~(localId + i) & 0xffffu);
+        renderPris[localId + i] = PICK(dis, i) << 16 | int(~(localId + i) & 0xffffu);
       }
     }
     memoryBarrierShared();
@@ -113,17 +136,18 @@ void main() {
     {
       int runP = -1, runN = 0, runD = 0, runLow = 6000;
       for (int i = 0; i < FACES_PER_THREAD; i++) {
-        if (localId + i < minfo.size && vis[i]) {
-          if (prio[i] != runP) {
+        if (localId + i < minfo.size && PICK(vis, i)) {
+          int p = PICK(prio, i), d = PICK(dis, i);
+          if (p != runP) {
             add_priority_run(runP, runN, runD, runLow);
-            runP = prio[i];
+            runP = p;
             runN = 0;
             runD = 0;
             runLow = 6000;
           }
           runN++;
-          runD += dis[i];
-          runLow = min(runLow, dis[i]);
+          runD += d;
+          runLow = min(runLow, d);
         }
       }
       add_priority_run(runP, runN, runD, runLow);
@@ -136,31 +160,32 @@ void main() {
     // priority takes its places at once (any places do: the stretch is sorted next)
     int idx[FACES_PER_THREAD];
     for (int i = 0; i < FACES_PER_THREAD; i++) {
-      prioAdj[i] = adjusted_priority(localId + i, minfo, prio[i], dis[i]);
+      int pa = adjusted_priority(localId + i, minfo, PICK(prio, i), PICK(dis, i));
+      PUT(prioAdj, i, pa);
     }
     for (int i = 0; i < FACES_PER_THREAD; i++) {
+      int pa = PICK(prioAdj, i), at = 0;
       if (localId + i < minfo.size) {
-        if (i > 0 && prioAdj[i] == prioAdj[i - 1]) {
-          idx[i] = idx[i - 1] + 1;
+        if (i > 0 && pa == PICK(prioAdj, i - 1)) {
+          at = PICK(idx, i - 1) + 1;
         } else {
           int n = 1;
           for (int j = i + 1; j < FACES_PER_THREAD; j++) {
-            if (localId + j < minfo.size && prioAdj[j] == prioAdj[i] && n == j - i) {
+            if (localId + j < minfo.size && PICK(prioAdj, j) == pa && n == j - i) {
               n++;
             }
           }
-          idx[i] = atomicAdd(totalMappedNum[prioAdj[i]], n);
+          at = atomicAdd(totalMappedNum[pa], n);
         }
-      } else {
-        idx[i] = 0;
       }
+      PUT(idx, i, at);
     }
 
     memoryBarrierShared();
     barrier();
 
     for (int i = 0; i < FACES_PER_THREAD; i++) {
-      insert_face(localId + i, minfo, prioAdj[i], dis[i], idx[i]);
+      insert_face(localId + i, minfo, PICK(prioAdj, i), PICK(dis, i), PICK(idx, i));
     }
 
     memoryBarrierShared();
@@ -172,6 +197,6 @@ void main() {
 #endif
 
   for (int i = 0; i < FACES_PER_THREAD; i++) {
-    sort_and_insert(localId + i, minfo, prioAdj[i], dis[i]);
+    sort_and_insert(localId + i, minfo, PICK(prioAdj, i), PICK(dis, i));
   }
 }

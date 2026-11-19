@@ -328,8 +328,8 @@ void sort_priorities() {
   barrier();
   // this thread's comparators, of every stretch's numbered one after another: the t-th, t + THREAD_COUNT-th, ...;
   // each kept as its stretch (bits 16 and up) and its number in it, -1 past the last stretch's. (11/19/2026: the q-th
-  // found for each q in turn, rather than added at a running count: an array indexed at run time is in the card's slow
-  // local memory, and a fixed loop over q is written out, so mine stays in registers. The same comparators.)
+  // found for each q in turn, rather than added at a running count, and read and set by comp.glsl's PICK and PUT: an
+  // array indexed at run time is in the card's slow local memory. The same comparators.)
   int mine[FACES_PER_THREAD];
   int maxLog = 0;
   for (int p = 0; p < 18; ++p) {
@@ -346,16 +346,17 @@ void sort_priorities() {
       }
       first += pairs;
     }
-    mine[q] = found;
+    PUT(mine, q, found);
   }
   for (int lk = 1; lk <= maxLog; ++lk) {
     // the flip: within each block of k = 2^lk, the i-th place against the i-th from the end
     int k = 1 << lk, hk = k >> 1;
     for (int q = 0; q < FACES_PER_THREAD; ++q) {
-      if (mine[q] < 0) {
+      int m = PICK(mine, q);
+      if (m < 0) {
         continue;
       }
-      int p = mine[q] >> 16, i = mine[q] & 0xffff;
+      int p = m >> 16, i = m & 0xffff;
       if (lk <= stretchLog[p]) {
         int a = ((i >> (lk - 1)) << lk) + (i & (hk - 1));
         int b = ((i >> (lk - 1)) << lk) + k - 1 - (i & (hk - 1));
@@ -375,10 +376,11 @@ void sort_priorities() {
     for (int lj = lk - 2; lj >= 0; --lj) {
       int j = 1 << lj;
       for (int q = 0; q < FACES_PER_THREAD; ++q) {
-        if (mine[q] < 0) {
+        int m = PICK(mine, q);
+        if (m < 0) {
           continue;
         }
-        int p = mine[q] >> 16, i = mine[q] & 0xffff;
+        int p = m >> 16, i = m & 0xffff;
         if (lk <= stretchLog[p]) {
           int a = ((i >> lj) << (lj + 1)) + (i & (j - 1));
           int b = a + j;

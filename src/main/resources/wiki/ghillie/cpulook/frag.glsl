@@ -32,6 +32,8 @@
 
 #include texture_config
 
+#include "cpu_acc.glsl"
+
 layout(std140) uniform uniforms {
   float cameraYaw;
   float cameraPitch;
@@ -98,7 +100,9 @@ void loadRecord() {
   fT1 = recs[b + 4];
   fT2 = recs[b + 5];
   fKey = intBitsToFloat(recs[b + 6]);
-  fDepth = vec4(0.0);  // the depth-buffer diagnostic and the old ground stopgap draw by the geometry stage
+  // the depth-buffer diagnostic and the old ground stopgap draw by the geometry stage; w: the middle-to-bottom edge's
+  // start, in the record's last slot
+  fDepth = vec4(0.0, 0.0, 0.0, intBitsToFloat(recs[b + 7].w));
 }
 #else
 flat in ivec4 fRows, fEdge, fCol, fT0, fT1, fT2;
@@ -129,8 +133,7 @@ ivec2 uvAt(int U, int V, int W) {
 // none fogDepth tiles in), worked out for the pixel's own point in the world instead of at each corner: its depth from
 // the CPU's depth key (the key's formula turned round, the face's bias put back), its place across from the screen and
 // that depth, then the camera's turn undone (cpu_turn.glsl's, backwards) and the camera's place added.
-float fogAmount(int px, int py) {
-  float key = fKey.x + fKey.z * float(py - int(fKey.w)) + fKey.y * float(px);
+float fogAmount(int px, int py, float key) {
   if (!(key > 1.0100503)) {
     return 1.0;  // as far as the key reaches
   }
@@ -164,13 +167,30 @@ void main() {
   // game's order (pass 2), scenery drawn only where it's no farther than the ground plus the allowance; the ground
   // itself and players, NPCs, items and projectiles always drawn
   float iz = fDepth.x * float(px) + fDepth.y * float(py) + fDepth.z;
+  int yt = fRows.x, ym = fRows.y, yb = fRows.z, fl = fRows.w;
+  // the row's two ends, as today's client walks a triangle (11/19/2026, claude/cpu-look-stage-b.md, "the client walks a
+  // triangle's edges in floats"): each edge from its start, its slope added once a row in floats (cpu_acc.glsl), the
+  // left end truncated up to the right one; then the depth key from the row's own start, a float addition a pixel
+  int x1 = px, x2 = px + 1;
+  if ((cpuFlags & 16) == 0) {
+    if (py < yt || py >= yb) discard;
+    float eL = cpu_acc(intBitsToFloat(fEdge.x), intBitsToFloat(fEdge.z), py - yt);
+    float eO = py < ym ? cpu_acc(intBitsToFloat(fEdge.y), intBitsToFloat(fEdge.w), py - yt)
+      : cpu_acc(fDepth.w, intBitsToFloat(fCol.x), py - ym);
+    bool longLeft = (fl & 1) != 0;
+    x1 = max(int(longLeft ? eL : eO), 0);
+    x2 = min(int(longLeft ? eO : eL), viewSize.x);
+    if (px < x1 || px >= x2) discard;
+  }
+  precise float keyRow = cpu_acc(fKey.x, fKey.z, py - int(fKey.w));
+  precise float keyStart = keyRow + fKey.y * float(x1);
+  float key = cpu_acc(keyStart, fKey.y, px - x1);
   if ((cpuFlags & 32) != 0 && (cpuFlags & 8) == 0 && groundPass == 0) {
     // the CPU's own depth test (claude/cpu-look.md, "Read from today's client", question 4): the key, linear over the
     // screen, the greatest kept, a key of 0 or less never kept. Written as a depth the hardware compares exactly the
     // way the CPU compares keys: a positive float's bits order as its value, so the key's bits, shifted down into
     // the depth range's own floats, keep every key distinct and in order (from 2^-8 to 2^56; keys past either end,
     // which no corner beyond z = 75 has, share the end)
-    precise float key = fKey.x + fKey.z * float(py - int(fKey.w)) + fKey.y * float(px);
     if (!(key > 0.0)) discard;
     if (painterBand > 0.0) {
       uint stored = floatBitsToUint(texelFetch(painterDepth, ivec2(gl_FragCoord.xy), 0).r) + 0x3B000000u;
@@ -190,24 +210,15 @@ void main() {
     FragColor = vec4(pal(fT2.z), 1.0 - float(fT2.y) / 255.0);
     return;
   }
-  int yt = fRows.x, ym = fRows.y, yb = fRows.z, fl = fRows.w;
-  if (py < yt || py >= yb) discard;
-
-  // the row's two ends
-  int L = (fEdge.x << 14) + fEdge.z * (py - yt);
-  int S = py < ym ? (fEdge.x << 14) + fEdge.w * (py - yt) : (fEdge.y << 14) + fCol.x * (py - ym);
-  bool longLeft = (fl & 1) != 0;
-  int x1 = max((longLeft ? L : S) >> 14, 0);
-  int x2 = min((longLeft ? S : L) >> 14, viewSize.x);
-  if (px < x1 || px >= x2) discard;
-
   int d = px - x1;
   int start = fCol.y + fCol.w * (py - yt) + x1 * fCol.z;  // a textured face's shade where the row starts
   vec3 rgb;
   if ((fl & 2) == 0) {
-    // a float palette index, as today's client: (int) c & 65535, one lookup a 4-pixel brick
-    precise float row = fColF.x + fColF.z * float(py - yt) + float(x1) * fColF.y;
-    precise float c = (cpuFlags & 1) != 0 ? row + float(d >> 2) * (fColF.y * 4.0) : row + float(d) * fColF.y;
+    // a float palette index, as today's client: the row's seed added to once a row, the row's start, then four
+    // pixels' step added once a 4-pixel brick, each a float addition; (int) c & 65535 the brick's lookup
+    precise float row = cpu_acc(fColF.x, fColF.z, py - yt);
+    precise float rowStart = row + fColF.y * float(x1);
+    float c = (cpuFlags & 1) != 0 ? cpu_acc(rowStart, fColF.y * 4.0, d >> 2) : cpu_acc(rowStart, fColF.y, d);
     int i0 = int(c) & 65535;
     if ((cpuFlags & 2) != 0) {
       rgb = pal(i0);
@@ -263,7 +274,7 @@ void main() {
       : b <= 12 ? vec3(0.35 + 0.65 * float(b) / 12.0, 0.0, 0.0) : vec3(1.0, 0.0, 1.0);
   }
   if (fogDepth > 0) {
-    rgb = mix(rgb, fogColor, fogAmount(px, py));
+    rgb = mix(rgb, fogColor, fogAmount(px, py, key));
   }
   FragColor = vec4(rgb, 1.0 - float(fT2.y) / 255.0);
 }

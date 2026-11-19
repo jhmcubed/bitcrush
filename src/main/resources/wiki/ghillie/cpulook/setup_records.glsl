@@ -101,7 +101,7 @@ void writeRec(int at, Rec r, int face) {
   recs[b + 4] = r.t1;
   recs[b + 5] = r.t2;
   recs[b + 6] = floatBitsToInt(r.key);
-  recs[b + 7] = ivec4(r.box.x | (r.box.z << 16), r.box.y | (r.box.w << 16), face, 0);
+  recs[b + 7] = ivec4(r.box.x | (r.box.z << 16), r.box.y | (r.box.w << 16), face, floatBitsToInt(r.depth.w));
 }
 
 // the face's triangles: full false, only how many (setup.glsl's setupFace)

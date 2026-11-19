@@ -99,15 +99,16 @@ void textureTerms(ivec3 p, ivec3 m, ivec3 n, bool tile, out ivec4 t0, out ivec4 
 // A triangle set up for the fragment stage: what the geometry stage hands each pixel (as flat varyings) or the record
 // path stores (setup_comp.glsl), and its box on the screen.
 struct Rec {
-  ivec4 rows;   // top row, middle row, bottom row, flags (1 long edge on the left, 2 textured, 4/8 marks, 16 tile, texture << 8)
-  ivec4 edge;   // top corner's x, middle corner's x, long edge's slope, top-to-middle slope
-  ivec4 col;    // middle-to-bottom slope; textured faces' int shade where the top row meets x = 0, its step across, its step down
-  vec4 colF;    // plain faces: the float palette index where the top row meets x = 0, its step across, its step down
+  ivec4 rows;   // first row, middle row, bottom row (each clamped to the screen), flags (1 long edge on the left, 2 textured, 4/8 marks, 16 tile, texture << 8)
+  ivec4 edge;   // floats' bits: the long edge's and the top-to-middle edge's x at the first row, their slopes
+  ivec4 col;    // the middle-to-bottom edge's slope (a float's bits); textured faces' int shade where the first row meets x = 0, its step across, its step down
+  vec4 colF;    // plain faces: the float palette index where the first row meets x = 0, its step across, its step down
   ivec4 t0;     // the texture's terms: u, u per 8 pixels, u per row, v
   ivec4 t1;     //                      v per 8 pixels, v per row, w, w per 8 pixels
   ivec4 t2;     //                      w per row; then the face's alpha, its colour, its bias
   vec4 key;     // the depth key where the first drawn row meets x = 0, its step across, its step down, that row
-  vec4 depth;   // 1/z as a plane over the screen (the depth-buffer diagnostic and the old ground stopgap)
+  vec4 depth;   // 1/z as a plane over the screen (the depth-buffer diagnostic and the old ground stopgap); w: the
+                // middle-to-bottom edge's x at the middle row
   ivec4 box;    // the box the fragment stage is run over: min x, min y, max x + 1, max y + 1
   ivec3 px;     // the rounded corners (the plain-triangles diagnostic)
   ivec3 py;
@@ -138,6 +139,9 @@ bool coverage(vec2 f0, vec2 f1, vec2 f2, out int x0, out int x1, out int x2, out
   box = ivec4(0);
   det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
   if (det == 0) return false;  // no area once on whole pixels
+  // nor on the unrounded corners (the client's second test, before its depth key's steps: 11/19/2026)
+  precise float kd = (f1.x - f0.x) * (f2.y - f0.y) - (f2.x - f0.x) * (f1.y - f0.y);
+  if (kd == 0.0) return false;
   int minX = max(0, min(x0, min(x1, x2)));
   int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));
   int minY = max(0, min(y0, min(y1, y2)));
@@ -174,29 +178,36 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   ivec4 box;
   if (!coverage(f0, f1, f2, x0, x1, x2, y0, y1, y2, det, box)) return false;
 
-  int s01 = y0 != y1 ? idiv((x1 - x0) << 14, y1 - y0) : 0;
-  int s12 = y1 != y2 ? idiv((x2 - x1) << 14, y2 - y1) : 0;
-  int s02 = y0 != y2 ? idiv((x2 - x0) << 14, y2 - y0) : 0;
+  // the edges' slopes as the client's (fc.av and its kin, read 11/19/2026): float divisions of the rounded corners
+  // (fdiv.glsl: Java's), the same whichever way an edge is walked
+  float s01 = y0 != y1 ? fdiv(float(x1 - x0), float(y1 - y0)) : 0.0;
+  float s12 = y1 != y2 ? fdiv(float(x2 - x1), float(y2 - y1)) : 0.0;
+  float s02 = y0 != y2 ? fdiv(float(x2 - x0), float(y2 - y0)) : 0.0;
 
-  // the top corner, the middle one, and which edge is on the left
+  // the top corner (the least row), the middle one (the other two clamped to the screen's bottom first, as the client
+  // picks it), and which edge is on the left, by the client's own tests on those slopes
+  int H = viewSize.y;
   int t, m, b;
   bool longLeft;
   if (y0 <= y1 && y0 <= y2) {
     t = 0;
-    if (y1 < y2) { m = 1; b = 2; longLeft = (y0 != y1 && s02 < s01) || (y0 == y1 && s02 > s12); }
-    else { m = 2; b = 1; longLeft = !((y0 != y2 && s02 < s01) || (y0 == y2 && s12 > s01)); }
+    int c1 = min(y1, H), c2 = min(y2, H);
+    if (c1 < c2) { m = 1; b = 2; longLeft = !((y0 == c1 || !(s02 < s01)) && (y0 != c1 || !(s02 > s12))); }
+    else { m = 2; b = 1; longLeft = (y0 == c2 || !(s02 < s01)) && (y0 != c2 || !(s12 > s01)); }
   } else if (y1 <= y2) {
     t = 1;
-    if (y2 < y0) { m = 2; b = 0; longLeft = (y1 != y2 && s01 < s12) || (y1 == y2 && s01 > s02); }
+    int c2 = min(y2, H), c0 = min(y0, H);
+    if (c2 < c0) { m = 2; b = 0; longLeft = !((y1 == c2 || !(s01 < s12)) && (y1 != c2 || !(s01 > s02))); }
     else { m = 0; b = 2; longLeft = !(s01 < s12); }
   } else {
     t = 2;
-    if (y0 < y1) { m = 0; b = 1; longLeft = s12 < s02; }
+    int c0 = min(y0, H), c1 = min(y1, H);
+    if (c0 < c1) { m = 0; b = 1; longLeft = s12 < s02; }
     else { m = 1; b = 0; longLeft = !(s12 < s02); }
   }
-  int sTB = (t + b) == 1 ? s01 : (t + b) == 3 ? s12 : s02;
-  int sTM = (t + m) == 1 ? s01 : (t + m) == 3 ? s12 : s02;
-  int sMB = (m + b) == 1 ? s01 : (m + b) == 3 ? s12 : s02;
+  float sTB = (t + b) == 1 ? s01 : (t + b) == 3 ? s12 : s02;
+  float sTM = (t + m) == 1 ? s01 : (t + m) == 3 ? s12 : s02;
+  float sMB = (m + b) == 1 ? s01 : (m + b) == 3 ? s12 : s02;
   // the top, middle and bottom corners' values
   int xt = pick3(x0, x1, x2, t), xm = pick3(x0, x1, x2, m), yt = pick3(y0, y1, y2, t), ym = pick3(y0, y1, y2, m);
   int yb = pick3(y0, y1, y2, b), Ct = pick3(c0, c1, c2, t);
@@ -208,17 +219,25 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   float dc1 = float(c1 - c0), dc2 = float(c2 - c0);
   precise float ax = dc1 * (Y2 - Y0) - dc2 * (Y1 - Y0);
   precise float ay = dc2 * (X1 - X0) - dc1 * (X2 - X0);
-  ivec4 col = ivec4(sMB, 0, 0, 0);
+  // (a top above the screen: the client moves the row seed down to row 0, as it does the edges below)
+  ivec4 col = ivec4(floatBitsToInt(sMB), 0, 0, 0);
   vec4 colF = vec4(0.0);
   if ((flags & 2) != 0) {
     precise float axs = ax * 512.0;
     precise float ays = ay * 512.0;
     int gxI = int(fdiv(axs, fdet));
     int gyI = int(fdiv(ays, fdet));
-    col = ivec4(sMB, (Ct << 9) - gxI * xt + gxI, gxI, gyI);
+    int seedI = (Ct << 9) - gxI * xt + gxI;
+    if (yt < 0) {
+      seedI -= gyI * yt;
+    }
+    col = ivec4(floatBitsToInt(sMB), seedI, gxI, gyI);
   } else {
     float gx = fdiv(ax, fdet), gy = fdiv(ay, fdet);
     precise float seed = float(Ct) - gx * float(xt) + gx;
+    if (yt < 0) {
+      seed -= gy * float(yt);
+    }
     colF = vec4(seed, gx, gy, 0.0);
   }
 
@@ -235,8 +254,23 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   key -= sy * frac;
   vec4 keyF = vec4(key, sx, sy, float(max(yt, 0)));
 
-  ivec4 rows = ivec4(yt, ym, yb, (longLeft ? 1 : 0) | flags);
-  ivec4 edge = ivec4(xt, xm, sTB, sTM);
+  // the rows and the edges' starts (the long one and the top-to-middle one at the top row, the middle-to-bottom one at the
+  // middle row): the middle and bottom rows clamped to the screen's bottom, and a top or a middle above the screen moved
+  // down to row 0 along its edges, x - slope * y in floats, as the client does; the fragment stage adds the slopes on
+  // from there a row at a time (cpu_acc.glsl)
+  int ymC = min(ym, H), ybC = min(yb, H), ytC = yt;
+  precise float eL = float(xt), eS = float(xt), eM = float(xm);
+  if (ytC < 0) {
+    eL = float(xt) - sTB * float(ytC);
+    eS = float(xt) - sTM * float(ytC);
+    ytC = 0;
+  }
+  if (ymC < 0) {
+    eM = float(xm) - sMB * float(ymC);
+    ymC = 0;
+  }
+  ivec4 rows = ivec4(ytC, ymC, ybC, (longLeft ? 1 : 0) | flags);
+  ivec4 edge = ivec4(floatBitsToInt(eL), floatBitsToInt(eS), floatBitsToInt(sTB), floatBitsToInt(sTM));
   ivec4 tt2 = ivec4(t40, alpha, (flags & 2) != 0 ? c0 & 127 : c0, bias);  // w: the face's bias (the bias view)
 
   // 1/z over the screen (the depth-buffer diagnostic and the old ground stopgap)
@@ -244,7 +278,7 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   float dax = float(x1 - x0), day = float(y1 - y0), dbx = float(x2 - x0), dby = float(y2 - y0);
   float ad = iz.y - iz.x, bd = iz.z - iz.x;
   float dA = (ad * dby - bd * day) / fdet, dB = (bd * dax - ad * dbx) / fdet;
-  vec4 depth = vec4(dA, dB, iz.x - dA * float(x0) - dB * float(y0), 0.0);
+  vec4 depth = vec4(dA, dB, iz.x - dA * float(x0) - dB * float(y0), eM);  // w: the middle-to-bottom edge's start
 
   r.rows = rows;
   r.edge = edge;

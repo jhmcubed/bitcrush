@@ -37,13 +37,11 @@ flat out int gAhsl;
 flat out int gTextureId;
 flat out int gBias;
 out vec3 gTexPos;
-flat out int gFace;  // the face's place in the game's order (its triangles' first vertex / 3): see-through faces' rule
 
 void main() {
   gVertex = vert;
   gAhsl = ahsl;
   gTextureId = int(uv.x) & 511;
-  gBias = (int(uv.x) >> 9) & 255;
+  gBias = (((int(uv.x) >> 9) & 255) ^ 128) - 128;  // the bias is a signed byte, as the CPU takes it
   gTexPos = uv.yzw;
-  gFace = gl_VertexID / 3;
 }

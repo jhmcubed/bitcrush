@@ -54,13 +54,12 @@ uniform int groundPass;           // "the ground hides what's under it": 1 the g
 uniform float groundAllowance;    // how far behind the ground (scene units) scenery still shows
 uniform vec2 textureAnimations[TEXTURE_COUNT];
 uniform int tick;
-// See-through faces exactly as the CPU (stage A4, 11/18/2026). The CPU draws everything in the game's order in one
-// pass: a solid face writes the pixel and its depth key where its key is greater; a see-through face blends where its
-// key is greater but leaves the key alone, so a solid face drawn after it covers it again. So at a pixel, after the
-// solid face that wins it (the earliest with the greatest key), only the see-through faces nearer than it and after it
-// in the order show. The solid pass keeps each pixel's winner's place in the order (Winner, + 1); the see-through pass
-// (seeThroughPass) drops a pixel of a face that came before it.
-uniform int seeThroughPass;
+// See-through faces as the CPU draws them (11/19/2026, read from the client: claude/cpu-look.md, section 9, "The
+// CPU's two passes"): its rasterizer draws the scene twice, every solid face first (writing the pixel and its depth
+// key where its key is greater), then the see-through faces in the game's order, each blending where its key is
+// greater than the solid one's and leaving the key alone. So the plugin's two passes are the CPU's own: no face order
+// is kept between them. (Stage A4, 11/18/2026, kept each pixel's solid winner and dropped a see-through face handed
+// over before it, as a CPU drawing in one pass would; the client's doesn't.)
 
 // fog (11/18/2026, Jace: "I like my max draw distance being softened by fog rather than a hard cut"): the GPU plugin's,
 // not the CPU's (which has none); 0 tiles is off, the CPU renderer's hard edge
@@ -68,7 +67,6 @@ uniform int fogDepth;        // in tiles
 uniform int drawDistance;    // in tiles
 uniform int expandedChunks;  // Extended map loading
 uniform vec3 fogColor;       // the sky's
-uniform isampler2D winners;
 
 #ifdef RECORDS
 // the record path (setup_comp.glsl): the triangle's setup read from its record, not handed on by every corner
@@ -78,8 +76,6 @@ layout(std430, binding = 4) readonly buffer records_in {
 };
 ivec4 fRows, fEdge, fCol, fT0, fT1, fT2;
 vec4 fColF, fKey, fDepth;
-int fFace;
-
 void loadRecord() {
   int b = fRec * 8;
   fRows = recs[b];
@@ -90,11 +86,9 @@ void loadRecord() {
   fT1 = recs[b + 4];
   fT2 = recs[b + 5];
   fKey = intBitsToFloat(recs[b + 6]);
-  fFace = recs[b + 7].z;
   fDepth = vec4(0.0);  // the depth-buffer diagnostic and the old ground stopgap draw by the geometry stage
 }
 #else
-flat in int fFace;
 flat in ivec4 fRows, fEdge, fCol, fT0, fT1, fT2;
 flat in vec4 fColF;  // plain faces: the float palette index where the top row meets x = 0, its steps across and down
 flat in vec4 fKey;   // the depth key where the first drawn row meets x = 0, its steps across and down, that row
@@ -102,7 +96,6 @@ flat in vec4 fDepth;
 #endif
 
 layout(location = 0) out vec4 FragColor;
-layout(location = 1) out int Winner;
 
 int idiv(int a, int b) {
   int q = int(uint(abs(a)) / uint(abs(b)));
@@ -167,7 +160,6 @@ void main() {
     // which no corner beyond z = 75 has, share the end)
     precise float key = fKey.x + fKey.z * float(py - int(fKey.w)) + fKey.y * float(px);
     if (!(key > 0.0)) discard;
-    if (seeThroughPass == 1 && fFace + 1 <= texelFetch(winners, ivec2(gl_FragCoord.xy), 0).r) discard;
     uint kb = clamp(floatBitsToUint(key), 0x3B800000u, 0x5B7FFFFFu) - 0x3B000000u;
     gl_FragDepth = uintBitsToFloat(kb);
   } else if ((cpuFlags & 8) != 0 || groundPass == 1) {
@@ -180,7 +172,6 @@ void main() {
   if ((cpuFlags & 16) != 0) {
     // plain triangles (diagnostic): one flat colour a face, the hardware's own fill
     FragColor = vec4(pal(fT2.z), 1.0 - float(fT2.y) / 255.0);
-    Winner = fFace + 1;
     return;
   }
   int yt = fRows.x, ym = fRows.y, yb = fRows.z, fl = fRows.w;
@@ -249,13 +240,14 @@ void main() {
   }
   if ((cpuFlags & 64) != 0) {
     // the bias view (Diagnostics): faces with no bias dimmed, a bias of 1 to 12 in reds (brighter for more), over 12
-    // in magenta: which faces the CPU's depth key lifts toward the camera, and by how much (twice the bias, in units)
+    // in magenta: which faces the CPU's depth key lifts toward the camera, and by how much (twice the bias, in units);
+    // a negative bias, which pushes the face away, in blues (-1 to -12), under -12 in cyan
     int b = fT2.w;
-    rgb = b == 0 ? rgb * 0.3 : b <= 12 ? vec3(0.35 + 0.65 * float(b) / 12.0, 0.0, 0.0) : vec3(1.0, 0.0, 1.0);
+    rgb = b == 0 ? rgb * 0.3 : b < -12 ? vec3(0.0, 1.0, 1.0) : b < 0 ? vec3(0.0, 0.0, 0.35 - 0.65 * float(b) / 12.0)
+      : b <= 12 ? vec3(0.35 + 0.65 * float(b) / 12.0, 0.0, 0.0) : vec3(1.0, 0.0, 1.0);
   }
   if (fogDepth > 0) {
     rgb = mix(rgb, fogColor, fogAmount(px, py));
   }
   FragColor = vec4(rgb, 1.0 - float(fT2.y) / 255.0);
-  Winner = fFace + 1;
 }

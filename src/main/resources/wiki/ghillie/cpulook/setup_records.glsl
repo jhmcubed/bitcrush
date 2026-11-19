@@ -114,7 +114,7 @@ int faceSetup(int f, bool full, out int alpha, out Rec r0, out Rec r1) {
   vec3 tp[3] = vec3[3](ua.yzw, ub.yzw, uc.yzw);
   // the texture's number + 1 and the face's bias, as vert.glsl reads them from the first corner's texture slot
   int tx = int(ua.x);
-  return setupFace(v, ah, tx & 511, (tx >> 9) & 255, tp, full, r0, r1);
+  return setupFace(v, ah, tx & 511, (((tx >> 9) & 255) ^ 128) - 128, tp, full, r0, r1);  // the bias signed, as the CPU's
 }
 
 void main() {

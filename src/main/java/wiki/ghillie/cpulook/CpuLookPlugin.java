@@ -349,11 +349,8 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private int fboCpu = -1;
 	private int texCpu = -1;
 	private int rboCpuDepth = -1;
-	// see-through faces exactly as the CPU (stage A4): each pixel's solid winner's place in the order (+ 1), kept by the
-	// solid pass in a second target, read by the see-through pass, which draws to a framebuffer without it
-	private int texWinner = -1;
-	private int fboCpuSee = -1;
-	private int uniSeeThroughPass, uniWinners, uniRecSeeThroughPass, uniRecWinners;
+	// (stage A4's winners, each pixel's solid winner kept for the see-through pass, went 11/19/2026: the CPU draws all its
+	// solid faces before any see-through one, so a see-through face blends wherever its key beats the solid one's)
 	private int lastCpuWidth = -1;
 	private int lastCpuHeight = -1;
 	// the CPU's palette (65536 colours at the client's brightness) as a 256 × 256 texture
@@ -856,8 +853,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		uniBlockMain = GL43C.glGetUniformBlockIndex(glProgram, "uniforms");
 		uniTextures = GL43C.glGetUniformLocation(glProgram, "textures");
 		uniTextureAnimations = GL43C.glGetUniformLocation(glProgram, "textureAnimations");
-		uniSeeThroughPass = GL43C.glGetUniformLocation(glProgram, "seeThroughPass");
-		uniWinners = GL43C.glGetUniformLocation(glProgram, "winners");
 
 		uniTex = GL43C.glGetUniformLocation(glUiProgram, "tex");
 		uniTexSamplingMode = GL43C.glGetUniformLocation(glUiProgram, "samplingMode");
@@ -903,8 +898,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			uniRecBlock = GL43C.glGetUniformBlockIndex(glRecordProgram, "uniforms");
 			uniRecTextures = GL43C.glGetUniformLocation(glRecordProgram, "textures");
 			uniRecTextureAnimations = GL43C.glGetUniformLocation(glRecordProgram, "textureAnimations");
-			uniRecSeeThroughPass = GL43C.glGetUniformLocation(glRecordProgram, "seeThroughPass");
-			uniRecWinners = GL43C.glGetUniformLocation(glRecordProgram, "winners");
 		}
 	}
 
@@ -1514,29 +1507,11 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		GL43C.glRenderbufferStorage(GL43C.GL_RENDERBUFFER, GL43C.GL_DEPTH_COMPONENT32F, width, height);
 		GL43C.glFramebufferRenderbuffer(GL43C.GL_FRAMEBUFFER, GL43C.GL_DEPTH_ATTACHMENT, GL43C.GL_RENDERBUFFER, rboCpuDepth);
 		GL43C.glBindRenderbuffer(GL43C.GL_RENDERBUFFER, 0);
-		// each pixel's solid winner (stage A4), an int a pixel, read by texelFetch only
-		texWinner = GL43C.glGenTextures();
-		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, texWinner);
-		GL43C.glTexImage2D(GL43C.GL_TEXTURE_2D, 0, GL43C.GL_R32I, width, height, 0, GL43C.GL_RED_INTEGER, GL43C.GL_INT, 0);
-		GL43C.glTexParameteri(GL43C.GL_TEXTURE_2D, GL43C.GL_TEXTURE_MIN_FILTER, GL43C.GL_NEAREST);
-		GL43C.glTexParameteri(GL43C.GL_TEXTURE_2D, GL43C.GL_TEXTURE_MAG_FILTER, GL43C.GL_NEAREST);
-		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, 0);
-		GL43C.glFramebufferTexture2D(GL43C.GL_FRAMEBUFFER, GL43C.GL_COLOR_ATTACHMENT1, GL43C.GL_TEXTURE_2D, texWinner, 0);
-		GL43C.glDrawBuffers(new int[]{GL43C.GL_COLOR_ATTACHMENT0, GL43C.GL_COLOR_ATTACHMENT1});
+		GL43C.glDrawBuffers(new int[]{GL43C.GL_COLOR_ATTACHMENT0});
 		int status = GL43C.glCheckFramebufferStatus(GL43C.GL_FRAMEBUFFER);
 		if (status != GL43C.GL_FRAMEBUFFER_COMPLETE)
 		{
 			throw new RuntimeException("CPU look FBO is incomplete. status: " + status);
-		}
-		// the see-through pass's: the same picture and depth, without the winners it reads
-		fboCpuSee = GL43C.glGenFramebuffers();
-		GL43C.glBindFramebuffer(GL43C.GL_FRAMEBUFFER, fboCpuSee);
-		GL43C.glFramebufferTexture2D(GL43C.GL_FRAMEBUFFER, GL43C.GL_COLOR_ATTACHMENT0, GL43C.GL_TEXTURE_2D, texCpu, 0);
-		GL43C.glFramebufferRenderbuffer(GL43C.GL_FRAMEBUFFER, GL43C.GL_DEPTH_ATTACHMENT, GL43C.GL_RENDERBUFFER, rboCpuDepth);
-		status = GL43C.glCheckFramebufferStatus(GL43C.GL_FRAMEBUFFER);
-		if (status != GL43C.GL_FRAMEBUFFER_COMPLETE)
-		{
-			throw new RuntimeException("CPU look see-through FBO is incomplete. status: " + status);
 		}
 		GL43C.glBindFramebuffer(GL43C.GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
 
@@ -1550,16 +1525,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			GL43C.glDeleteFramebuffers(fboCpu);
 			fboCpu = -1;
-		}
-		if (fboCpuSee != -1)
-		{
-			GL43C.glDeleteFramebuffers(fboCpuSee);
-			fboCpuSee = -1;
-		}
-		if (texWinner != -1)
-		{
-			GL43C.glDeleteTextures(texWinner);
-			texWinner = -1;
 		}
 		if (texCpu != -1)
 		{
@@ -2196,11 +2161,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, fboCpu);
 			GL43C.glViewport(0, 0, viewportWidth, viewportHeight);
 			GL43C.glClearDepth(0d);
-			// the picture and depth cleared (the winners' int target apart: a float clear leaves an int one undefined)
-			GL43C.glDrawBuffers(new int[]{GL43C.GL_COLOR_ATTACHMENT0});
 			GL43C.glClear(GL43C.GL_COLOR_BUFFER_BIT | GL43C.GL_DEPTH_BUFFER_BIT);
-			GL43C.glDrawBuffers(new int[]{GL43C.GL_COLOR_ATTACHMENT0, GL43C.GL_COLOR_ATTACHMENT1});
-			GL43C.glClearBufferiv(GL43C.GL_COLOR, 1, new int[]{0, 0, 0, 0});
 			if (timing)
 			{
 				timer.mark(FrameTimer.SCENE_START);
@@ -2247,8 +2208,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			GL43C.glUniformBlockBinding(glProgram, uniBlockMain, 0);
 			GL43C.glUniform1i(uniTextures, 1); // texture sampler array is bound to texture1
 			GL43C.glUniform1i(uniPalette, 3);
-			GL43C.glUniform1i(uniSeeThroughPass, 0);
-			GL43C.glUniform1i(uniWinners, 4);
 			GL43C.glActiveTexture(GL43C.GL_TEXTURE3);
 			GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, paletteTexture);
 			GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
@@ -2305,8 +2264,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 			if (keyTest)
 			{
-				// the CPU's depth test: solid faces first, in the game's order, testing and writing the key; then the
-				// see-through ones, in the same order, tested against it but never writing it, as the CPU's are
+				// the CPU's depth test, in its own two passes (claude/cpu-look.md, section 9, "The CPU's two passes"): every
+				// solid face first, testing and writing the key; then the see-through ones in the game's order, tested
+				// against it but never writing it
 				GL43C.glUniform1i(uniAlphaPass, 1);
 				GL43C.glDrawArrays(GL43C.GL_TRIANGLES, 0, targetBufferOffset);
 				if (timing)
@@ -2315,8 +2275,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				}
 				GL43C.glDepthMask(false);
 				GL43C.glUniform1i(uniAlphaPass, 2);
-				seeThroughTarget(true);
-				GL43C.glUniform1i(uniSeeThroughPass, 1);
 				if (orderTest)
 				{
 					// the re-sort diagnostic moved the triangles: every one again
@@ -2338,8 +2296,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					GL43C.glMultiDrawArrays(GL43C.GL_TRIANGLES, seeFirstBuf, seeCountBuf);
 				}
 				GL43C.glUniform1i(uniAlphaPass, 0);
-				GL43C.glUniform1i(uniSeeThroughPass, 0);
-				seeThroughTarget(false);
 			}
 			else
 			{
@@ -3169,8 +3125,6 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		}
 		GL43C.glUniform1i(uniRecTextures, 1);
 		GL43C.glUniform1i(uniRecPalette, 3);
-		GL43C.glUniform1i(uniRecSeeThroughPass, 0);
-		GL43C.glUniform1i(uniRecWinners, 4);
 		GL43C.glBindVertexArray(vaoRecords);
 		GL43C.glBindBuffer(GL43C.GL_DRAW_INDIRECT_BUFFER, recCommands.glBufferId);
 		GL43C.glUniform1i(uniRecListB, 0);
@@ -3182,23 +3136,10 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (keyTest)
 		{
 			GL43C.glDepthMask(false);
-			seeThroughTarget(true);
-			GL43C.glUniform1i(uniRecSeeThroughPass, 1);
 			GL43C.glUniform1i(uniRecListB, 1);
 			GL43C.glDrawArraysIndirect(GL43C.GL_TRIANGLES, 16L);
-			GL43C.glUniform1i(uniRecSeeThroughPass, 0);
-			seeThroughTarget(false);
 		}
 		GL43C.glBindBuffer(GL43C.GL_DRAW_INDIRECT_BUFFER, 0);
-	}
-
-	// the see-through pass's target (stage A4): the picture and depth without the winners, which it reads instead
-	private void seeThroughTarget(boolean on)
-	{
-		GL43C.glBindFramebuffer(GL43C.GL_DRAW_FRAMEBUFFER, on ? fboCpuSee : fboCpu);
-		GL43C.glActiveTexture(GL43C.GL_TEXTURE4);
-		GL43C.glBindTexture(GL43C.GL_TEXTURE_2D, on ? texWinner : 0);
-		GL43C.glActiveTexture(GL43C.GL_TEXTURE0);
 	}
 
 	// this frame's totals (solid records, see-through records, the overflow flag) copied out for the overflow check, into

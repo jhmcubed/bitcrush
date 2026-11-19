@@ -1062,6 +1062,8 @@ class SceneUploader
 
 	// a face's bias (Model.getFaceBias, a whole unsigned byte as RuneLite's own GPU plugin reads it), for the CPU's
 	// depth key (until 11/18/2026 cut to 15, which sank things that lie on the ground)
+	// the face's bias as its eight bits; the shaders sign-extend them: the CPU takes the byte signed (pa: the byte times 2
+	// off the corner's depth), so a bias of -1 puts the face 2 units farther, not 510 nearer (11/19/2026, Jace's boots)
 	private static int bias(byte[] bias, int face)
 	{
 		return bias == null || face >= bias.length ? 0 : bias[face] & 0xff;

@@ -63,9 +63,8 @@ uniform ivec2 viewSize;  // the game view, in game pixels
 in vec3 gVertex[3];       // relative to the camera
 flat in int gAhsl[3];     // alpha << 24 | marks (20 tile, 22 ground, 23 never hidden) | colour
 flat in int gTextureId[3];
-flat in int gBias[3];     // the face's bias (Model.getFaceBias, 0 to 255), carried in the texture slot
+flat in int gBias[3];     // the face's bias (Model.getFaceBias, a signed byte, -128 to 127), carried in the texture slot
 in vec3 gTexPos[3];       // the texture's P, M, N, relative to the camera
-flat in int gFace[3];     // the face's place in the game's order
 
 flat out ivec4 fRows;  // top row, middle row, bottom row, flags (1 long edge on the left, 2 textured, 4/8 marks, 16 tile, texture << 8)
 flat out ivec4 fEdge;  // top corner's x, middle corner's x, long edge's slope, top-to-middle slope
@@ -76,7 +75,6 @@ flat out ivec4 fT1;    //                      v per 8 pixels, v per row, w, w p
 flat out ivec4 fT2;    //                      w per row; then the face's alpha, its colour (for plain triangles)
 flat out vec4 fKey;    // the depth key where the first drawn row meets x = 0, its step across, its step down, that row
 flat out vec4 fDepth;  // 1/z as a plane over the screen, for the depth-buffer diagnostic
-flat out int fFace;    // the face's place in the game's order (frag.glsl: see-through faces after the pixel's winner only)
 
 uniform int cpuFlags;  // 1 bricks, 2 bands, 4 texture spans, 8 depth buffer, 16 plain triangles (diagnostics), 32 the CPU's depth key
 uniform int groundPass;  // "the ground hides what's under it" (the old stopgap): 1 the ground alone, into the depth buffer; 2 everything
@@ -91,7 +89,6 @@ void emitRec(Rec r) {
     for (int k = 0; k < 3; k++) {
       gl_Position = vec4((float(r.px[k]) + 0.5) / float(viewSize.x) * 2.0 - 1.0, 1.0 - (float(r.py[k]) + 0.5) / float(viewSize.y) * 2.0, 0.0, 1.0);
       fRows = r.rows; fEdge = r.edge; fCol = r.col; fColF = r.colF; fT0 = r.t0; fT1 = r.t1; fT2 = r.t2; fKey = r.key; fDepth = r.depth;
-      fFace = gFace[0];
       EmitVertex();
     }
     EndPrimitive();
@@ -102,7 +99,6 @@ void emitRec(Rec r) {
     vec2 p = vec2((k & 1) == 1 ? hi.x : lo.x, (k & 2) == 2 ? hi.y : lo.y);
     gl_Position = vec4(p.x / float(viewSize.x) * 2.0 - 1.0, 1.0 - p.y / float(viewSize.y) * 2.0, 0.0, 1.0);
     fRows = r.rows; fEdge = r.edge; fCol = r.col; fColF = r.colF; fT0 = r.t0; fT1 = r.t1; fT2 = r.t2; fKey = r.key; fDepth = r.depth;
-    fFace = gFace[0];
     EmitVertex();
   }
   EndPrimitive();

@@ -646,6 +646,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 						st[k] = new Stage();
 					}
 					stages = st;
+					zoneWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r ->
+					{
+						Thread t = new Thread(r, "Bitcrush zone walk");
+						t.setDaemon(true);
+						return t;
+					});
 				}
 				else
 				{
@@ -701,6 +707,13 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		clientThread.invoke(() ->
 		{
+			waitZone();
+			zonePostPending = false;
+			if (zoneWorker != null)
+			{
+				zoneWorker.shutdown();
+				zoneWorker = null;
+			}
 			client.setGpuFlags(0);
 			client.setDrawCallbacks(null);
 			client.setUnlockedFps(false);
@@ -1706,6 +1719,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawScene(double cameraX, double cameraY, double cameraZ, double cameraPitch, double cameraYaw, int plane)
 	{
+		// (a frame whose draw never came: its thread's work finished, uploaded, before this frame starts)
+		finishZone();
+		zoneThreadOn = zoneMode && config.zoneThread();
 		framePlane = plane;
 		final boolean timings = config.logTimings();
 		if (timing && !timings)
@@ -2259,10 +2275,12 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	{
 		if (!timing)
 		{
+			finishZone();
 			drawFrame(overlayColor);
 			return;
 		}
 		timer.drawStart();
+		finishZone();
 		final int triangles = targetBufferOffset / 3;
 		drawFrame(overlayColor);
 		timer.drawEnd(triangles);
@@ -2738,6 +2756,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
 	{
+		waitZone();
 		if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			// Avoid drawing the last frame's buffer during LOADING after LOGIN_SCREEN
@@ -2756,6 +2775,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void loadScene(Scene scene)
 	{
+		waitZone();
 		if (computeMode == ComputeMode.NONE)
 		{
 			return;
@@ -2824,6 +2844,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void loadScene(WorldView worldView, Scene scene)
 	{
+		waitZone();
 		if (Build.DEVELOPER)
 		{
 			worldViewLog.loaded(worldView, scene);
@@ -2842,6 +2863,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void swapScene(Scene scene)
 	{
+		waitZone();
 		if (computeMode == ComputeMode.NONE || scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			return;
@@ -3293,6 +3315,16 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				zoneWarned = true;
 			}
 		}
+		if (zonePostPending)
+		{
+			// (the thread has the frame: the scene's part ends here, the uploads wait for draw)
+			if (timing)
+			{
+				timer.postStart();
+				timer.postEnd();
+			}
+			return;
+		}
 		postDrawScene();
 	}
 
@@ -3414,29 +3446,49 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		if (prepared)
 		{
 			final int key = (groundHides ? 1 : 0) | (painterModels ? 2 : 0) | sceneId << 2;
-			if (key != recsKey || nRecs > (1 << 20))
+			if (key != recsKey || nRecs > 400_000)
 			{
-				// (also past a million: records left by zones read again pile up)
-				fastOrder.dropRecords();
+				// (also past 400,000: records left by zones read again pile up) the scene read again, every record made
+				// again as it's read
+				fastOrder.invalidateAll();
 				recsKey = key;
-				nRecs = 0;
-				dropRecData();
-				recsSeen = fastOrder.records;
 			}
 		}
 		fastOrder.setTemps(tempG, temps);
 		fastOrder.setItems(itemLayers, nItemLayers);
 		// (entries with a prepared draw noted by it alone, unless a check or diagnostic needs every entry in full)
 		fastOrder.lean = prepared && !zoneCheck;
-		fastOrder.buildCached(scene, cx, cz, distance, visible, fr);
-		final boolean lean = fastOrder.lean;
-		fastOrder.lean = false;
+		prepScene = scene;
+		fastOrder.preparer = preparer;
+		final boolean begun = fastOrder.beginCached(scene, cx, cz, distance);
 		fastOrder.setTemps(null, 0);
 		fastOrder.setItems(null, 0);
 		zoneReadZones += fastOrder.zonesRead;
 		zoneFullReads += fastOrder.fullRead ? 1 : 0;
 		zoneReadSlots += fastOrder.slotsRead;
+		final boolean lean = fastOrder.lean;
 		final boolean reference = fastOrder.overflowed;
+		if (!begun && !reference)
+		{
+			fastOrder.lean = false;
+			return;
+		}
+		// the rest on zone mode's own thread, beside the client's interface and RuneLite's overlays, when nothing this
+		// frame needs the client's objects there (no check or diagnostic; the developer's tile log done here)
+		if (begun && zoneWorker != null && zoneThreadOn && lean && !zoneCheck && !zoneWhyNext)
+		{
+			markOutput();
+			zoneAborted = false;
+			zoneDrawScene = scene;
+			zoneTask = zoneWorker.submit(() -> zoneWork(scene, visible, fr, true, true, true));
+			zonePostPending = true;
+			return;
+		}
+		if (begun)
+		{
+			fastOrder.finishCached(scene, visible, fr);
+		}
+		fastOrder.lean = false;
 		if (reference)
 		{
 			cpuOrder.setTemps(tempG, temps);
@@ -3476,25 +3528,43 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			}
 			return;
 		}
-		final int[] params = new int[4];
-		// the static draws from their prepared records (made the first time each is drawn, kept until its zone is read
-		// again or the scene changes); the rest, and every draw while a diagnostic needs each call, as before
-		if (prepared && fastOrder.records != recsSeen)
-		{
-			// (the scene read whole in this frame's walk: every record dropped with it, none used yet)
-			nRecs = 0;
-			dropRecData();
-			recsSeen = fastOrder.records;
-		}
+		final int[] params = zoneParams;
 		final long loop0 = timing ? System.nanoTime() : 0, apart0 = timing ? timer.callbacksSoFar() : 0;
+		drawLoop(scene, lean, prepared, false);
+		if (timing)
+		{
+			timer.callbacks(System.nanoTime() - loop0 - (timer.callbacksSoFar() - apart0), zoneFast);
+		}
+		if (Build.DEVELOPER && zoneCheck && prepared && zoneChecks % 30 == 0)
+		{
+			checkRecords(scene, params);
+		}
+	}
+
+	// the static draws from their prepared records; the rest as the old mode's callbacks drew them. safe (zone mode's
+	// own thread): nothing of the client's read, the temporary objects, items and moving models as copied when handed
+	// over; any other draw stops it (zoneAborted), the frame's draw list then made again on the client's thread
+	private void drawLoop(Scene scene, boolean lean, boolean prepared, boolean safe)
+	{
+		final int[] params = zoneParams;
+		final FastOrder f = fastOrder;
+		final int[] krec = f.krec;
 		int fast = 0;
-		final int[] krec = fastOrder.krec;
-		for (int k = 0; k < fastOrder.n; k++)
+		for (int k = 0, n = f.n; k < n; k++)
 		{
 			if (lean && krec[k] >= 0)
 			{
 				drawRecord(krec[k]);
 				fast++;
+				continue;
+			}
+			if (safe)
+			{
+				if (!zoneEntrySafe(f.keys[k], f.ksrc[k]))
+				{
+					zoneAborted = true;
+					return;
+				}
 				continue;
 			}
 			if (prepared)
@@ -3507,15 +3577,176 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 					continue;
 				}
 			}
-			zoneEntry(scene, fastOrder.keys[k], fastOrder.ksrc[k], fastOrder.kkind[k], k, params);
+			zoneEntry(scene, f.keys[k], f.ksrc[k], f.kkind[k], k, params);
 		}
+		zoneFast = fast;
+	}
+
+	// a temporary object, item or moving model as copied when the client handed it over; false for anything else
+	private boolean zoneEntrySafe(Object key, Object src)
+	{
+		if (!(key instanceof Renderable))
+		{
+			return false;
+		}
+		Integer up = src instanceof GameObject ? zoneTemp.get(src) : null;
+		if (up == null)
+		{
+			up = zoneDyn.get(key);
+		}
+		if (up == null)
+		{
+			return false;
+		}
+		if (up >= 0)
+		{
+			zoneQueue(up);
+		}
+		return true;
+	}
+
+	/**
+	 * Zone mode's own thread (11/19/2026): after postSceneDraw the client draws its interface and RuneLite its overlays
+	 * before calling draw; the walk's second half (which tiles are in view, the sweep) and the draw list run there
+	 * meanwhile, on a thread of CPU Look's own, reading only CPU Look's arrays and copies; draw waits for it, then
+	 * uploads and dispatches. Anything else of CPU Look's that touches the same state waits for it first (the next
+	 * frame's drawScene, a scene's load or swap, shutting down).
+	 */
+	private java.util.concurrent.ExecutorService zoneWorker;
+	private java.util.concurrent.Future<?> zoneTask;
+	private volatile boolean zoneAborted;
+	private boolean zonePostPending, zoneThreadOn;
+	private Scene zoneDrawScene;
+	private final int[] zoneParams = new int[4];
+	private int zoneFast;
+	// the thread's last frame: the walk's second half and the draw list (ns), draws from records
+	private long zoneWalkNs, zoneListNs;
+
+	private void zoneWork(Scene scene, CpuOrder.Visible visible, FastOrder.Frustum fr, boolean lean, boolean prepared, boolean safe)
+	{
+		final long t0 = System.nanoTime();
+		fastOrder.finishCached(scene, visible, fr);
+		final long t1 = System.nanoTime();
+		drawLoop(scene, lean, prepared, safe);
+		zoneWalkNs = t1 - t0;
+		zoneListNs = System.nanoTime() - t1;
+	}
+
+	// wait for the thread's frame, if it has one going
+	private void waitZone()
+	{
+		final java.util.concurrent.Future<?> t = zoneTask;
+		if (t == null)
+		{
+			return;
+		}
+		zoneTask = null;
+		try
+		{
+			t.get();
+		}
+		catch (InterruptedException | java.util.concurrent.ExecutionException ex)
+		{
+			if (!zoneWarned)
+			{
+				log.warn("CPU Look's zone thread couldn't finish the frame; doing it on the client's thread", ex);
+				zoneWarned = true;
+			}
+			zoneAborted = true;
+		}
+	}
+
+	// the frame's end in draw: the thread waited for (its draw list made again here if it had to stop), then the
+	// uploads and the compute dispatch postSceneDraw left
+	private void finishZone()
+	{
+		if (!zonePostPending)
+		{
+			return;
+		}
+		zonePostPending = false;
+		final long w0 = timing ? System.nanoTime() : 0;
+		waitZone();
+		final long waited = timing ? System.nanoTime() - w0 : 0;
+		fastOrder.lean = false;
+		boolean redone = false;
+		if (zoneAborted)
+		{
+			resetOutput();
+			drawLoop(zoneDrawScene, true, true, false);
+			redone = true;
+		}
+		zoneDrawScene = null;
+		final long u0 = timing ? System.nanoTime() : 0;
+		postDrawScene0();
 		if (timing)
 		{
-			timer.callbacks(System.nanoTime() - loop0 - (timer.callbacksSoFar() - apart0), fast);
+			timer.order(fastOrder.readNs + zoneWalkNs, fastOrder.n, fastOrder.readNs, fastOrder.setupNs - fastOrder.readNs, fastOrder.sweepNs);
+			timer.zoneThread(zoneWalkNs + zoneListNs, waited, System.nanoTime() - u0, redone);
 		}
-		if (Build.DEVELOPER && zoneCheck && prepared && zoneChecks % 30 == 0)
+	}
+
+	// the frame's output as it stood before the draw list (put back if the thread had to stop)
+	private int markTarget, markTemp, markTempUv, markUv, markSee, markPainter;
+	private int markSmall, markLarge, markUnordered, markTiny, markMid;
+	private final int[] markBig = new int[BIG_TIERS.length], markTierFaces = new int[FrameTimer.TIERS.length];
+	private final int[] markPos = new int[6 + BIG_TIERS.length], markStaged = new int[6 + BIG_TIERS.length];
+
+	private GpuIntBuffer[] modelBuffers()
+	{
+		GpuIntBuffer[] all = new GpuIntBuffer[6 + BIG_TIERS.length];
+		all[0] = modelBuffer;
+		all[1] = modelBufferSmall;
+		all[2] = modelBufferTiny;
+		all[3] = modelBufferMid;
+		all[4] = modelBufferUnordered;
+		all[5] = vertexBuffer;
+		System.arraycopy(modelBufferBig, 0, all, 6, BIG_TIERS.length);
+		return all;
+	}
+
+	private void markOutput()
+	{
+		markTarget = targetBufferOffset;
+		markTemp = tempOffset;
+		markTempUv = tempUvOffset;
+		markUv = uvBuffer.getBuffer().position();
+		markSee = seeRanges;
+		markPainter = painterRanges;
+		markSmall = smallModels;
+		markLarge = largeModels;
+		markUnordered = unorderedModels;
+		markTiny = tinyModels;
+		markMid = midModels;
+		System.arraycopy(bigModels, 0, markBig, 0, markBig.length);
+		System.arraycopy(tierFaces, 0, markTierFaces, 0, markTierFaces.length);
+		final GpuIntBuffer[] all = modelBuffers();
+		for (int i = 0; i < all.length; i++)
 		{
-			checkRecords(scene, params);
+			markPos[i] = all[i].getBuffer().position();
+			markStaged[i] = all[i].stagedCount();
+		}
+	}
+
+	private void resetOutput()
+	{
+		targetBufferOffset = markTarget;
+		tempOffset = markTemp;
+		tempUvOffset = markTempUv;
+		uvBuffer.getBuffer().position(markUv);
+		seeRanges = markSee;
+		painterRanges = markPainter;
+		smallModels = markSmall;
+		largeModels = markLarge;
+		unorderedModels = markUnordered;
+		tinyModels = markTiny;
+		midModels = markMid;
+		System.arraycopy(markBig, 0, bigModels, 0, markBig.length);
+		System.arraycopy(markTierFaces, 0, tierFaces, 0, markTierFaces.length);
+		final GpuIntBuffer[] all = modelBuffers();
+		for (int i = 0; i < all.length; i++)
+		{
+			all[i].restore(markPos[i], markStaged[i]);
 		}
 	}
 
@@ -3539,6 +3770,34 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 	private final GpuIntBuffer prepVB = new GpuIntBuffer();
 	private final GpuFloatBuffer prepUB = new GpuFloatBuffer();
 	private int[] recs = new int[REC * 16384];
+	// the scene the walk is reading (for the records made as it reads: FastOrder.Preparer)
+	private Scene prepScene;
+	private final int[] prepParams = new int[4];
+	private final FastOrder.Preparer preparer = new FastOrder.Preparer()
+	{
+		@Override
+		public void reset()
+		{
+			nRecs = 0;
+			dropRecData();
+			recsSeen = fastOrder.records;
+		}
+
+		@Override
+		public int prepare(Object key, Object src, byte kind)
+		{
+			final Scene scene = prepScene;
+			if (scene == null)
+			{
+				return -1;
+			}
+			if ((nRecs + 1) * REC > recs.length)
+			{
+				recs = Arrays.copyOf(recs, recs.length * 2);
+			}
+			return CpuLookPlugin.this.prepare(scene, key, src, kind, prepParams, recs, nRecs * REC, true) ? nRecs++ : -2;
+		}
+	};
 	private int nRecs, recsSeen = -1, recsKey = -1;
 	private final int[] recCheck = new int[REC];
 	private int recChecked, recDiffer;
@@ -3562,7 +3821,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 		{
 			recs = Arrays.copyOf(recs, recs.length * 2);
 		}
-		r = prepare(scene, k, params, recs, nRecs * REC, true) ? nRecs++ : -2;
+		r = prepare(scene, f.keys[k], f.ksrc[k], f.kkind[k], params, recs, nRecs * REC, true) ? nRecs++ : -2;
 		if (ref >= 0)
 		{
 			f.tileRec[ref] = r;
@@ -3576,11 +3835,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	// entry k's record into out from at; false when it isn't a static draw (one for drawRenderable's other branches);
 	// keep: an at-rest animated object's copied numbers kept with the records (else into checkVerts, for the check)
-	private boolean prepare(Scene scene, int k, int[] params, int[] out, int at, boolean keep)
+	private boolean prepare(Scene scene, Object key, Object src, byte kind, int[] params, int[] out, int at, boolean keep)
 	{
-		final FastOrder f = fastOrder;
-		final Object key = f.keys[k], src = f.ksrc[k];
-		if (f.kkind[k] == FastOrder.K_GROUND)
+		if (kind == FastOrder.K_GROUND)
 		{
 			if (!(src instanceof Tile))
 			{
@@ -3623,9 +3880,9 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			out[at + 11] = 0;
 			return true;
 		}
-		if (key instanceof net.runelite.api.DynamicObject && src instanceof TileObject && f.kkind[k] != FastOrder.K_ITEM)
+		if (key instanceof net.runelite.api.DynamicObject && src instanceof TileObject && kind != FastOrder.K_ITEM)
 		{
-			return preparePushed(scene, k, params, out, at, keep, (net.runelite.api.DynamicObject) key, (TileObject) src);
+			return preparePushed(scene, key, src, kind, params, out, at, keep, (net.runelite.api.DynamicObject) key, (TileObject) src);
 		}
 		if (!(key instanceof Model))
 		{
@@ -3642,7 +3899,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			return false;
 		}
 		final boolean shown = !(src instanceof TileObject) || renderCallbackManager.drawObject(scene, (TileObject) src);
-		final long hash = f.draw(k, params);
+		final long hash = FastOrder.draw(key, src, kind, params);
 		if (params[0] < 0)
 		{
 			return false;
@@ -3672,7 +3929,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 
 	// an at-rest animated object's record: zoneEntry's still path (drawRenderable's temporary branch with the object's
 	// getModelZbuf), its model copied now
-	private boolean preparePushed(Scene scene, int k, int[] params, int[] out, int at, boolean keep,
+	private boolean preparePushed(Scene scene, Object key, Object srcObject, byte kind, int[] params, int[] out, int at, boolean keep,
 		net.runelite.api.DynamicObject d, TileObject src)
 	{
 		final Model still = d.getModelZbuf();
@@ -3681,7 +3938,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 			return false;
 		}
 		final boolean shown = renderCallbackManager.drawObject(scene, src);
-		final long hash = fastOrder.draw(k, params);
+		final long hash = FastOrder.draw(key, srcObject, kind, params);
 		if (params[0] < 0)
 		{
 			return false;
@@ -3902,7 +4159,7 @@ public class CpuLookPlugin extends Plugin implements DrawCallbacks
 				continue;
 			}
 			recChecked++;
-			boolean same = prepare(scene, k, params, recCheck, 0, false);
+			boolean same = prepare(scene, f.keys[k], f.ksrc[k], f.kkind[k], params, recCheck, 0, false);
 			final boolean pushed = (recs[r * REC + 10] & RB_PUSHED) != 0;
 			for (int j = 0; same && j < (pushed ? REC - 1 : REC); j++)
 			{

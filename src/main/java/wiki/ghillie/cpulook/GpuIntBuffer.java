@@ -64,6 +64,18 @@ class GpuIntBuffer
 		nStaged = n + 8;
 	}
 
+	// the ints staged so far (zone mode's own thread: the frame's output marked before its draw list, and put back)
+	int stagedCount()
+	{
+		return nStaged;
+	}
+
+	void restore(int position, int staged)
+	{
+		buffer.position(position);
+		nStaged = staged;
+	}
+
 	void flip()
 	{
 		if (nStaged > 0)

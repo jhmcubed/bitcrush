@@ -92,6 +92,9 @@ class FrameTimer
 	private long lastDrawing;
 	// the processor, summed over the period (nanoseconds)
 	private long walk, callbacks, post, drawing, upload, sceneCommands, swap, frame, rest;
+	// within the rest: from the end of the scene's work (postDrawScene) to the frame's drawing (draw), where the client
+	// draws its interface and RuneLite its overlays (11/19/2026: the time CPU Look's walk could run beside, on a thread)
+	private long between, postEndAt;
 	private int frames;
 	private long draws, triangles;
 	private final long[] models = new long[TIERS.length], faces = new long[TIERS.length];
@@ -102,6 +105,8 @@ class FrameTimer
 	private long orderNs, orderDraws, orderReadNs, orderViewNs, orderSweepNs;
 	// zone mode (stage B): the moving models copied inside the client's drawTemp and drawDynamic, and how many
 	private long zoneCopyNs, zoneCopies, zoneCopyOwnNs, zoneCopiesOwn;
+	// zone mode's own thread: its work, the frame's wait for it in draw, the uploads after; frames it had to stop in
+	private long zoneThreadNs, zoneWaitNs, zoneUploadNs, zoneThreadFrames, zoneRedone;
 	private boolean zoneFrames;
 	private int orderFrames, orderChecked, orderDiffered;
 	private int recordReads;
@@ -159,7 +164,8 @@ class FrameTimer
 
 	void postEnd()
 	{
-		framePost = System.nanoTime() - postStart;
+		postEndAt = System.nanoTime();
+		framePost = postEndAt - postStart;
 		post += framePost;
 	}
 
@@ -188,6 +194,15 @@ class FrameTimer
 			zoneCopiesOwn++;
 		}
 		zoneFrames = true;
+	}
+
+	void zoneThread(long workNs, long waitNs, long uploadNs, boolean redone)
+	{
+		zoneThreadNs += workNs;
+		zoneWaitNs += waitNs;
+		zoneUploadNs += uploadNs;
+		zoneThreadFrames++;
+		zoneRedone += redone ? 1 : 0;
 	}
 
 	void order(long ns, int n, long readNs, long viewNs, long sweepNs)
@@ -224,6 +239,11 @@ class FrameTimer
 	void drawStart()
 	{
 		long now = System.nanoTime();
+		if (postEndAt != 0)
+		{
+			between += now - postEndAt;
+			postEndAt = 0;
+		}
 		if (periodStart == 0)
 		{
 			periodStart = now;
@@ -428,16 +448,23 @@ class FrameTimer
 		log.info(String.format("CPU Look frame timings, average over %d frames (ms): a frame %.2f (%.0f a second); "
 				+ "processor: the game walking the scene %.2f, CPU Look's calls for what it hands over %.2f (%.0f calls), "
 				+ "uploads and compute dispatch %.2f, the frame's drawing %.2f (the interface's upload %.2f, the scene's "
-				+ "commands %.2f, the buffer swap %.2f), the rest of the frame (the game's own work and its frame cap's wait) %.2f; "
-				+ "%.0f triangles a frame%s",
+				+ "commands %.2f, the buffer swap %.2f), the rest of the frame (the game's own work and its frame cap's wait) %.2f "
+				+ "(of it, between the scene's work and the frame's drawing, where the client draws its interface and RuneLite its "
+				+ "overlays, %.2f); %.0f triangles a frame%s",
 			frames, frame / n / 1e6, frame > 0 ? 1e9 * n / frame : 0,
 			walk / n / 1e6, callbacks / n / 1e6, draws / n,
 			post / n / 1e6, drawing / n / 1e6, upload / n / 1e6, sceneCommands / n / 1e6, swap / n / 1e6, rest / n / 1e6,
+			between / n / 1e6,
 			triangles / n,
 			(zoneFrames ? String.format("; zone mode: inside the game's part, CPU Look's walk (below), and its copying of the "
 				+ "moving models the client hands over %.2f (%.0f models; added up over the client's threads, each copying its own "
 				+ "at the same time as the others, so the frame waits for less than this; on the client's own thread %.2f for %.0f)",
 				zoneCopyNs / n / 1e6, zoneCopies / n, zoneCopyOwnNs / n / 1e6, zoneCopiesOwn / n) : "")
+			+ (zoneThreadFrames > 0 ? String.format("; zone mode's own thread, in %d frames: the walk's second half and the draw list "
+				+ "%.2f (beside the client's interface and RuneLite's overlays), then in the frame's drawing the wait for it %.2f and the "
+				+ "uploads %.2f; done again on the client's thread in %d frames", zoneThreadFrames,
+				zoneThreadNs / (double) zoneThreadFrames / 1e6, zoneWaitNs / (double) zoneThreadFrames / 1e6,
+				zoneUploadNs / (double) zoneThreadFrames / 1e6, zoneRedone) : "")
 			+ (orderFrames > 0 ? String.format("; within the uploads, CPU Look working out the CPU's order itself (the re-sort "
 				+ "diagnostic, the fast walk) %.2f for %.0f draws (reading the scene, in zone mode the zones read again and the temporary objects put on, %.2f, which tiles are in view %.2f, the sweep "
 				+ "%.2f), checked against the reference walk in %d frames, %d differing", orderNs / (double) orderFrames / 1e6,
@@ -457,7 +484,7 @@ class FrameTimer
 			recordReads > 0 ? String.format("%.0f", recordsSee / (double) recordReads) : "-"));
 		reportSlow();
 
-		walk = callbacks = post = drawing = upload = sceneCommands = swap = frame = rest = 0;
+		walk = callbacks = post = drawing = upload = sceneCommands = swap = frame = rest = between = 0;
 		frames = 0;
 		draws = triangles = 0;
 		Arrays.fill(models, 0);
@@ -467,6 +494,7 @@ class FrameTimer
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
+		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);
@@ -555,7 +583,7 @@ class FrameTimer
 		tickSeen = false;
 		frameCallbacks = frameWalk = frameCalls = framePost = lastDrawing = 0;
 		frameDraws = 0;
-		walk = callbacks = post = drawing = upload = sceneCommands = swap = frame = rest = 0;
+		walk = callbacks = post = drawing = upload = sceneCommands = swap = frame = rest = between = 0;
 		frames = 0;
 		draws = triangles = 0;
 		Arrays.fill(models, 0);
@@ -565,6 +593,7 @@ class FrameTimer
 		recordReads = 0;
 		orderNs = orderDraws = orderReadNs = orderViewNs = orderSweepNs = 0;
 		zoneCopyNs = zoneCopies = zoneCopyOwnNs = zoneCopiesOwn = 0;
+		zoneThreadNs = zoneWaitNs = zoneUploadNs = zoneThreadFrames = zoneRedone = 0;
 		zoneFrames = false;
 		orderFrames = orderChecked = orderDiffered = 0;
 		Arrays.fill(gpuSum, 0);

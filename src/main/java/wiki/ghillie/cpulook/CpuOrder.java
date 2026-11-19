@@ -509,7 +509,7 @@ final class CpuOrder
 			{
 				for (GameObject g : bos)
 				{
-					if (g != null)
+					if (g != null && (!sceneryOnly || FastOrder.scenery(g)))
 					{
 						emit(g.getRenderable(), g.getX(), g.getY());
 					}

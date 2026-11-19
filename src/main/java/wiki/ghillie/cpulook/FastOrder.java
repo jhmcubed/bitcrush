@@ -253,10 +253,14 @@ final class FastOrder
 	 */
 	long draw(int k, int[] out)
 	{
-		final Object src = ksrc[k];
-		final net.runelite.api.Renderable r = keys[k] instanceof net.runelite.api.Renderable ? (net.runelite.api.Renderable) keys[k] : null;
+		return draw(keys[k], ksrc[k], kkind[k], out);
+	}
+
+	static long draw(Object key, Object src, byte kind, int[] out)
+	{
+		final net.runelite.api.Renderable r = key instanceof net.runelite.api.Renderable ? (net.runelite.api.Renderable) key : null;
 		final int lift = r != null ? r.getAnimationHeightOffset() : 0;
-		switch (kkind[k])
+		switch (kind)
 		{
 			case K_WALL1:
 			case K_WALL2:
@@ -273,7 +277,7 @@ final class FastOrder
 			case K_DECOR2:
 			{
 				DecorativeObject d = (DecorativeObject) src;
-				boolean second = kkind[k] == K_DECOR2;
+				boolean second = kind == K_DECOR2;
 				out[0] = 0;
 				out[1] = d.getX() + (second ? d.getXOffset2() : d.getXOffset());
 				out[2] = d.getZ() - lift;
@@ -350,17 +354,32 @@ final class FastOrder
 	// frustum: zone mode's own test of which tiles are in view (viewZone), in place of visible
 	void buildCached(Scene scene, int cameraX, int cameraZ, int drawDistance, CpuOrder.Visible visible, Frustum frustum)
 	{
-		final long t0 = System.nanoTime();
+		if (beginCached(scene, cameraX, cameraZ, drawDistance))
+		{
+			finishCached(scene, visible, frustum);
+		}
+	}
+
+	/**
+	 * Zone mode's frame in two halves (11/19/2026, for zone mode's own thread): beginCached reads what it needs from the
+	 * client (the zones it says changed, this frame's temporary objects and items onto their tiles) and must run on the
+	 * client's thread; finishCached (which tiles are in view, the sweep, the temporary objects taken off again) touches
+	 * only the walk's own arrays, on any thread, while the client's own thread leaves the walk alone. False from
+	 * beginCached: nothing to finish (no tiles; or overflowed, CpuOrder to do the frame).
+	 */
+	boolean beginCached(Scene scene, int cameraX, int cameraZ, int drawDistance)
+	{
+		t0 = System.nanoTime();
 		Tile[][][] tiles = begin(scene, cameraX, cameraZ, drawDistance);
 		if (tiles == null)
 		{
-			return;
+			return false;
 		}
 		sync(scene, tiles);
 		if (overflowTiles > 0)
 		{
 			overflowed = true;
-			return;
+			return false;
 		}
 		placeTemps();
 		boolean fits;
@@ -376,10 +395,18 @@ final class FastOrder
 		{
 			takeTempsOff();
 			overflowed = true;
-			return;
+			return false;
 		}
 		putItems();
 		readNs = System.nanoTime() - t0;
+		return true;
+	}
+
+	private long t0;
+
+	void finishCached(Scene scene, CpuOrder.Visible visible, Frustum frustum)
+	{
+		final long tv = System.nanoTime();
 		if (frustum != null)
 		{
 			viewZone(frustum);
@@ -388,10 +415,17 @@ final class FastOrder
 		{
 			view(scene, visible);
 		}
-		setupNs = System.nanoTime() - t0;
 		final long t1 = System.nanoTime();
-		sweep(minLevel, radius);
-		takeTempsOff();
+		setupNs = readNs + (t1 - tv);
+		try
+		{
+			sweep(minLevel, radius);
+		}
+		finally
+		{
+			// (always: the kept tiles must stay as read)
+			takeTempsOff();
+		}
 		sweepNs = System.nanoTime() - t1;
 	}
 
@@ -739,6 +773,10 @@ final class FastOrder
 		overflowTiles = 0;
 		Arrays.fill(tileRec, -1);
 		records++;
+		if (preparer != null)
+		{
+			preparer.reset();
+		}
 		for (int p = 0; p < 4; p++)
 		{
 			for (int x = 0; x < SIZE; x++)
@@ -870,6 +908,10 @@ final class FastOrder
 				{
 					o = make(g, g.getSceneMinLocation(), g.getSceneMaxLocation(), x, y);
 					objIndex.put(g, o);
+					if (preparer != null && oR[o] != null)
+					{
+						oRec[o] = preparer.prepare(oR[o], g, K_OBJ);
+					}
 				}
 				if (!putObject(o, i, x, y) && !overflow[i])
 				{
@@ -879,6 +921,7 @@ final class FastOrder
 			}
 		}
 		read(tile, i, b, false);
+		prepareSlot(i, x, y);
 	}
 
 	/**
@@ -1177,11 +1220,162 @@ final class FastOrder
 		}
 		Tile bridge = tile.getBridge();
 		refs[r + R_BRIDGE] = bridge;
+		bridgeAt[i] = bridge != null ? readBridge(bridge, !items) : null;
 		if (bridge != null)
 		{
 			has |= H_BRIDGE;
 		}
 		meta[i] = meta[i] & ~(63 << 4) | has << 4;
+	}
+
+	/**
+	 * What lies under a bridge (the tile the client moved down, Tile.getBridge), read with the tile: its ground, its
+	 * wall and its objects, as the sweep draws them first on the tile above (CpuOrder.first). rec: each one's prepared
+	 * draw (zone mode; ground 0, wall 1, the objects from 2), -1 for none. Read when its tile is (11/19/2026: read every
+	 * frame from the client before, which zone mode's own thread mustn't).
+	 */
+	static final class Bridge
+	{
+		Tile tile;
+		Object ground;
+		Object wall;
+		WallObject wallObject;
+		int wallX, wallY, n;
+		Object[] objects = new Object[0];
+		GameObject[] gameObjects = new GameObject[0];
+		int[] objX = new int[0], objY = new int[0];
+		int[] rec = new int[0];
+	}
+
+	private final Bridge[] bridgeAt = new Bridge[ALL];
+
+	// sceneryOnly: zone mode keeps only the scenery under it (FastOrder.scenery), as on every tile
+	private static Bridge readBridge(Tile t, boolean sceneryOnly)
+	{
+		final Bridge br = new Bridge();
+		br.tile = t;
+		Object ground = t.getSceneTilePaint();
+		br.ground = ground != null ? ground : t.getSceneTileModel();
+		WallObject w = t.getWallObject();
+		if (w != null)
+		{
+			br.wall = w.getRenderable1();
+			br.wallObject = w;
+			br.wallX = w.getX();
+			br.wallY = w.getY();
+		}
+		GameObject[] gos = t.getGameObjects();
+		if (gos != null)
+		{
+			br.objects = new Object[gos.length];
+			br.gameObjects = new GameObject[gos.length];
+			br.objX = new int[gos.length];
+			br.objY = new int[gos.length];
+			for (GameObject g : gos)
+			{
+				if (g != null && (!sceneryOnly || scenery(g)))
+				{
+					br.objects[br.n] = g.getRenderable();
+					br.gameObjects[br.n] = g;
+					br.objX[br.n] = g.getX();
+					br.objY[br.n] = g.getY();
+					br.n++;
+				}
+			}
+		}
+		br.rec = new int[2 + br.n];
+		Arrays.fill(br.rec, -1);
+		return br;
+	}
+
+	// a bridge's entry: by its prepared draw (lean), or in full
+	private void emitBridge(Bridge br, int role, Object key, int x, int z, Object src, byte kind)
+	{
+		if (key == null)
+		{
+			return;
+		}
+		if (lean && br.rec[role] >= 0)
+		{
+			note(br.rec[role]);
+			return;
+		}
+		emit(key, x, z, src, kind, -1);
+	}
+
+	/**
+	 * Zone mode's prepared draws, made when a tile is read (11/19/2026: they were made the first time each was drawn,
+	 * which reads the client's objects, and zone mode's own thread mustn't): the plugin's, for each static draw a tile
+	 * has (its ground, walls, decorations, ground decoration, objects, and what's under a bridge), its record's index or
+	 * -2. reset: the whole scene is about to be read, every record goes.
+	 */
+	interface Preparer
+	{
+		void reset();
+
+		int prepare(Object key, Object src, byte kind);
+	}
+
+	Preparer preparer;
+
+	// slot i's static draws prepared (the tile just read; its objects as each is made)
+	private void prepareSlot(int i, int x, int y)
+	{
+		final Preparer pr = preparer;
+		if (pr == null || tileAt[i] == null)
+		{
+			return;
+		}
+		final int r = i * RSTRIDE, has = meta[i] >>> 4 & 63;
+		if ((has & H_GROUND) != 0)
+		{
+			tileRec[R_GROUND * ALL + i] = pr.prepare(groundAt[i], tileAt[i], K_GROUND);
+		}
+		if ((has & H_WALL) != 0)
+		{
+			if (refs[r + R_W1] != null)
+			{
+				tileRec[R_W1 * ALL + i] = pr.prepare(refs[r + R_W1], refs[r + R_WOBJ], K_WALL1);
+			}
+			if (refs[r + R_W2] != null)
+			{
+				tileRec[R_W2 * ALL + i] = pr.prepare(refs[r + R_W2], refs[r + R_WOBJ], K_WALL2);
+			}
+		}
+		if ((has & H_DECOR) != 0)
+		{
+			if (refs[r + R_D1] != null)
+			{
+				tileRec[R_D1 * ALL + i] = pr.prepare(refs[r + R_D1], refs[r + R_DOBJ], K_DECOR1);
+			}
+			if (refs[r + R_D2] != null)
+			{
+				tileRec[R_D2 * ALL + i] = pr.prepare(refs[r + R_D2], refs[r + R_DOBJ], K_DECOR2);
+			}
+		}
+		if ((has & H_GOBJ) != 0 && gRen[i] != null)
+		{
+			tileRec[R_G * ALL + i] = pr.prepare(gRen[i], gObj[i], K_GOBJ);
+		}
+		final Bridge br = bridgeAt[i];
+		if (br != null)
+		{
+			if (br.ground != null)
+			{
+				br.rec[0] = pr.prepare(br.ground, br.tile, K_GROUND);
+			}
+			if (br.wall != null)
+			{
+				br.rec[1] = pr.prepare(br.wall, br.wallObject, K_WALL1);
+			}
+			for (int j = 0; j < br.n; j++)
+			{
+				if (br.objects[j] != null)
+				{
+					br.rec[2 + j] = pr.prepare(br.objects[j], br.gameObjects[j], K_OBJ);
+				}
+			}
+		}
 	}
 
 	// the big object g seen on tile (p, x, y), slot i: the one already made for it this frame, or a new one
@@ -1543,24 +1737,13 @@ final class FastOrder
 		final int b = t * STRIDE, r = t * RSTRIDE, has = (meta[t] >>> 4 & 63);
 		if ((has & H_BRIDGE) != 0)
 		{
-			// rare: read from the bridge's tile as CpuOrder does
-			Tile bridge = (Tile) refs[r + R_BRIDGE];
-			ground(bridge, x, y);
-			WallObject bw = bridge.getWallObject();
-			if (bw != null)
+			// what's under the bridge first, as CpuOrder draws it (read with the tile: Bridge)
+			final Bridge br = bridgeAt[t];
+			emitBridge(br, 0, br.ground, (x - OFFSET) * 128 + 64, (y - OFFSET) * 128 + 64, br.tile, K_GROUND);
+			emitBridge(br, 1, br.wall, br.wallX, br.wallY, br.wallObject, K_WALL1);
+			for (int j = 0; j < br.n; j++)
 			{
-				emit(bw.getRenderable1(), bw.getX(), bw.getY(), bw, K_WALL1, -1);
-			}
-			GameObject[] bos = bridge.getGameObjects();
-			if (bos != null)
-			{
-				for (GameObject g : bos)
-				{
-					if (g != null)
-					{
-						emit(g.getRenderable(), g.getX(), g.getY(), g, K_OBJ, -1);
-					}
-				}
+				emitBridge(br, 2 + j, br.objects[j], br.objX[j], br.objY[j], br.gameObjects[j], K_OBJ);
 			}
 		}
 		final boolean hasGround = (has & H_GROUND) != 0;

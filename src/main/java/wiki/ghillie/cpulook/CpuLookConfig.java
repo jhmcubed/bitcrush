@@ -316,6 +316,19 @@ public interface CpuLookConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "zoneThread",
+		name = "Zone mode: walk on its own thread",
+		description = "Zone mode works out the CPU's order and its draw list on a thread of its own, while the client draws its interface and RuneLite its overlays, instead of before them. Off: all of it on the client's thread, as before (to compare).",
+		position = 48,
+		section = diagnostics,
+		hidden = !Build.DEVELOPER
+	)
+	default boolean zoneThread()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "logDrawOrder",
 		name = "Log the draw order",
 		description = "Writes one frame's draw order to RuneLite's log (the window run.py opens, and .runelite/logs/client.log): whether the ground in front of trees and logs is handed over before or after them. Turn it off and on again for another frame.",

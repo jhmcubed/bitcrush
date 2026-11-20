@@ -17,8 +17,8 @@ an unlocked frame rate, and fog at the far edge if you want it.
 
 1. In RuneLite, open the configuration panel (the wrench in the side bar), press **Plugin Hub** at its bottom, search
    for Bitcrush and press **Install**.
-2. Bitcrush installs switched off. Find it in the plugin list and switch it on. That switches the GPU plugin and
-   117 HD off, since only one renderer can run at a time; switching either of them back on switches Bitcrush off.
+2. Installing it switches Bitcrush on, and the GPU plugin and 117 HD off, since only one renderer can run at a time.
+   Switching either of them back on in the plugin list switches Bitcrush off, and the other way round.
 3. That's all: out of the box it draws as the game's own renderer does, 50 tiles out, with the frame rate unlocked
    (a target of 60). Its settings (the cog beside it) are below.
 

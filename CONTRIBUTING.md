@@ -46,8 +46,10 @@ The pixel-by-pixel checks (the test scenes drawn by the shaders and by a referen
 routines, then compared) live in that copy too: they need an OpenGL test harness that isn't one of the client's own
 dependencies.
 
-`solid-textures.txt` lists the textures the game marks solid (a texel of 0 drawn black, not left as a hole). RuneLite's
-API doesn't expose that flag, so the list was read from the game once with the developer build.
+`solid-textures.txt` lists the textures the game marks solid (a texel of 0 drawn black, not left as a hole). The flag
+is part of each texture's definition in the game's cache: RuneLite's cache library (`net.runelite:cache`) reads it as
+`TextureDefinition.field1778`. RuneLite's API doesn't expose it, so the plugin carries the list. After a game update
+that adds textures, the list is checked against the cache with that library.
 
 ## Where changes are made
 

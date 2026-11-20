@@ -1,8 +1,8 @@
 # The game's solid textures: in these a texel of 0 is drawn black by the CPU renderer; in the rest it leaves a hole.
-# The flag is part of each texture's definition, but RuneLite's API doesn't expose it, so this list was read once from
-# the running game by a probe in the author's developer build. The probe uses reflection, so it's test code that stays
-# out of the Plugin Hub's copy and the plugin; the plugin only reads this list (TextureManager). Read 11/18/2026:
-# 216 textures, 122 solid.
+# The flag is part of each texture's definition in the game's cache (TextureDefinition.field1778, as RuneLite's cache
+# library, net.runelite:cache, reads it). RuneLite's API doesn't expose it, so the plugin carries this list
+# (TextureManager). Checked against the game's cache 11/20/2026: 216 texture definitions (ids 0 to 216, none for 54),
+# 122 solid.
 0, 1, 2, 3, 4, 5, 6, 10, 11, 13, 14, 15, 16, 18, 20, 22, 23, 24, 25, 27, 31, 32, 35, 36, 37, 38, 39,
 40, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 55, 56, 57, 59, 91, 92, 93, 94, 95, 116, 117, 118,
 119, 120, 121, 122, 125, 126, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,

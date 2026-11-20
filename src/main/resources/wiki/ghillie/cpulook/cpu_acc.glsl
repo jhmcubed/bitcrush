@@ -23,13 +23,13 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// x after n additions of s, each rounded as Java's floats round (to the nearest, ties to even): how today's client
+// The general way (any run): x after n additions of s, each rounded as Java's floats round (to the nearest, ties to even): how today's client
 // steps along a triangle's edges, a row's colour and its depth key, a row or a pixel at a time (fc.av, fc.ay and the
 // textured routines; claude/cpu-look-stage-b.md, "the client walks a triangle's edges in floats"). Exact, without n
 // additions: inside one binade (one sign and exponent) adding s to any of its values rounds by the same rule, so once
 // three additions in a row have stayed in one binade (the last two settled even on a tie) the rest of the run inside
 // it is a multiplication in the binade's own units; then on into the next. n >= 0.
-float cpu_acc(float x, float s, int n) {
+float cpu_acc_runs(float x, float s, int n) {
   for (int guard = 0; guard < 128 && n > 0; guard++) {
     precise float y = x + s;
     if (n == 1) {
@@ -62,4 +62,49 @@ float cpu_acc(float x, float s, int n) {
     x = w;
   }
   return x;
+}
+
+// x after n additions of s (as cpu_acc_runs), the usual run quickly (11/20/2026: the walk had doubled the fragment
+// stage's time on his card): no step (a flat face's colour) leaves x as it is; and where x and x + s share a binade and
+// the step isn't a tie (half a unit of the binade left over, which rounds by parity), every further step inside the
+// binade adds the very same number of its units, so n of them that stay inside, a unit clear of its bottom, are one
+// multiplication, with no division and no loop. Anything else goes the general way.
+float cpu_acc(float x, float s, int n) {
+  if (n <= 0 || s == 0.0) {
+    return x;
+  }
+  precise float y = x + s;
+  if (n == 1) {
+    return y;
+  }
+  uint bx = floatBitsToUint(x), by = floatBitsToUint(y);
+  uint ex = bx >> 23u;  // sign and exponent
+  uint e = ex & 0xffu;
+  if ((by >> 23u) == ex && e > 24u && e < 0xffu && n < 4096) {
+    int mx = int(bx & 0x7fffffu) | 0x800000;
+    int d = (int(by & 0x7fffffu) | 0x800000) - mx;  // the step in the binade's units
+    precise float r = s - (y - x);  // what the rounding left of s (exact: y - x is, and r is s's low bits)
+    float halfUnit = uintBitsToFloat((e - 24u) << 23u);  // half a unit of the binade
+    if (abs(r) != halfUnit && abs(d) < 0x80000) {
+      int t = mx + n * d;
+      if (t >= 0x800001 && t <= 0xffffff) {
+        return uintBitsToFloat((bx & 0xff800000u) | uint(t & 0x7fffff));
+      }
+    }
+  }
+  return cpu_acc_runs(y, s, n - 1);
+}
+
+// How far n additions of a step can end from one multiplication (g = x + s * n, Java's two roundings): each addition
+// rounds by at most half a unit in the last place of its sum, so the walk ends within n units in the 24th bit of the
+// largest value on the way of x + n s exactly, and g within two of it; the largest value is under |x| + |g| + 1. Four
+// times that, so a guess and its reach settle most whole numbers without the walk (ShaderCheck's accCheck checks the
+// bound on every run). 2^-24 is 5.96e-8.
+float accTol(float x, float g, int n) {
+  return float(n + 4) * (abs(x) + abs(g) + 1.0) * 2.4e-7;
+}
+
+// whether int(v) is certain for every v within tol of g: all of it above 0 and no whole number inside
+bool sureInt(float g, float tol) {
+  return g - tol > 0.0 && floor(g - tol) == floor(g + tol);
 }

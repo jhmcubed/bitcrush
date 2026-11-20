@@ -174,13 +174,29 @@ void main() {
   int x1 = px, x2 = px + 1;
   if ((cpuFlags & 16) == 0) {
     if (py < yt || py >= yb) discard;
-    float eL = cpu_acc(intBitsToFloat(fEdge.x), intBitsToFloat(fEdge.z), py - yt);
-    float eO = py < ym ? cpu_acc(intBitsToFloat(fEdge.y), intBitsToFloat(fEdge.w), py - yt)
-      : cpu_acc(fDepth.w, intBitsToFloat(fCol.x), py - ym);
-    bool longLeft = (fl & 1) != 0;
-    x1 = max(int(longLeft ? eL : eO), 0);
-    x2 = min(int(longLeft ? eO : eL), viewSize.x);
-    if (px < x1 || px >= x2) discard;
+    // the two edges this row: the long one, and the top-to-middle or the middle-to-bottom one (picked first, so one
+    // walk serves every pixel whichever part of the triangle it is in), the left and the right of them
+    bool top = py < ym, longLeft = (fl & 1) != 0;
+    float oStart = top ? intBitsToFloat(fEdge.y) : fDepth.w, oSlope = intBitsToFloat(top ? fEdge.w : fCol.x);
+    int nLong = py - yt, nO = top ? py - yt : py - ym;
+    float lStart = longLeft ? intBitsToFloat(fEdge.x) : oStart, lSlope = longLeft ? intBitsToFloat(fEdge.z) : oSlope;
+    float rStart = longLeft ? oStart : intBitsToFloat(fEdge.x), rSlope = longLeft ? oSlope : intBitsToFloat(fEdge.z);
+    int lN = longLeft ? nLong : nO, rN = longLeft ? nO : nLong;
+    // a first look by one multiplication each: n roundings of a sum, each under a unit in the 24th bit of the
+    // largest value on the way, keep the walk's sum within lTol (rTol) of it. A pixel clear of either end by more
+    // goes now; the right end is walked only for a pixel near it (11/20/2026: the walk's cost)
+    float lGuess = lStart + lSlope * float(lN), rGuess = rStart + rSlope * float(rN);
+    float lTol = accTol(lStart, lGuess, lN), rTol = accTol(rStart, rGuess, rN);
+    float fx = float(px);
+    if (lGuess - lTol > fx + 1.0 || rGuess + rTol < fx) discard;
+    // an end's whole number is the guess's wherever no whole number lies within its reach; else the walk decides
+    x1 = lGuess + lTol < 0.0 ? 0 : sureInt(lGuess, lTol) ? int(lGuess) : max(int(cpu_acc(lStart, lSlope, lN)), 0);
+    if (px < x1) discard;
+    // (a textured ground tile's row steps evenly across its whole length, so it needs the right end always)
+    if (fx + 1.0 >= rGuess - rTol || ((fl & 18) == 18 && (cpuFlags & 4) != 0)) {
+      x2 = min(sureInt(rGuess, rTol) ? int(rGuess) : int(cpu_acc(rStart, rSlope, rN)), viewSize.x);
+      if (px >= x2) discard;
+    }
   }
   precise float keyRow = cpu_acc(fKey.x, fKey.z, py - int(fKey.w));
   precise float keyStart = keyRow + fKey.y * float(x1);
@@ -216,9 +232,18 @@ void main() {
   if ((fl & 2) == 0) {
     // a float palette index, as today's client: the row's seed added to once a row, the row's start, then four
     // pixels' step added once a 4-pixel brick, each a float addition; (int) c & 65535 the brick's lookup
-    precise float row = cpu_acc(fColF.x, fColF.z, py - yt);
-    precise float rowStart = row + fColF.y * float(x1);
-    float c = (cpuFlags & 1) != 0 ? cpu_acc(rowStart, fColF.y * 4.0, d >> 2) : cpu_acc(rowStart, fColF.y, d);
+    int j = (cpuFlags & 1) != 0 ? d >> 2 : d;
+    float cStep = (cpuFlags & 1) != 0 ? fColF.y * 4.0 : fColF.y;
+    // the lookup's whole number from a first look where none lies within its reach (the row's walk, the start's
+    // rounding and the bricks' walk, each bounded as an edge's); else the walk itself
+    float rowG = fColF.x + fColF.z * float(py - yt), startG = rowG + fColF.y * float(x1), cG = startG + cStep * float(j);
+    float cTol = float(py - yt + j + 8) * (abs(fColF.x) + abs(rowG) + abs(startG) + abs(cG) + 1.0) * 2.4e-7;
+    float c = cG;
+    if (!(sureInt(cG, cTol) && (cpuFlags & 2) != 0)) {
+      precise float row = cpu_acc(fColF.x, fColF.z, py - yt);
+      precise float rowStart = row + fColF.y * float(x1);
+      c = cpu_acc(rowStart, cStep, j);
+    }
     int i0 = int(c) & 65535;
     if ((cpuFlags & 2) != 0) {
       rgb = pal(i0);

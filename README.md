@@ -1,13 +1,31 @@
 # Bitcrush
 
-Bitcrush draws Old School RuneScape the way the game's own CPU renderer draws it, pixel for pixel, while keeping the
-GPU plugin's draw distance and frame rate.
+**The 07 look, kept exactly. The GPU's comforts, added around it.**
 
-The GPU plugin smooths the game out: exact corners, smooth shading, textures blended across every pixel. The CPU
-renderer (what the game uses without a GPU plugin) has a look of its own: corners snapped to whole pixels, shading
-stepped in 4-pixel bricks from the game's palette, textures stepped every 8 pixels, and its own rules for what's in
-front. Bitcrush works out that same arithmetic on the graphics card, so the picture is the CPU renderer's, at any draw
-distance and frame rate.
+Old School RuneScape still carries the software renderer it inherited from its 2007 roots, and its look is part of the
+game: corners snapped to whole pixels, light stepped in 4-pixel bricks from the game's own palette, textures stepped
+every 8 pixels, faces covering one another by the game's own rules. RuneLite's GPU plugin trades that look for
+smoothness and reach. The software renderer keeps it, but only 25 tiles out and at the game's 50 frames a second.
+
+Bitcrush doesn't make you choose. It runs the software renderer's own arithmetic on your graphics card: every corner
+turned and rounded, every triangle's edges, colour and depth stepped row by row, every face drawn in the game's own
+order, the way the game's own drawing routines do it. The picture is the native renderer's, pixel for pixel, but
+for the few exceptions listed below. Around it you get what only a graphics card can give: the GPU plugin's draw distance, an unlocked frame rate, and fog at the
+far edge if you want it.
+
+## Why
+
+The native renderer isn't a lesser version of the game's look; it is the game's look. Smoothing it away changes the
+game's character, and keeping it has always meant giving up how far you can see and how smoothly it runs. Bitcrush
+keeps the renderer's integrity and adds only the quality of life a graphics card makes possible.
+
+## How exact
+
+Bitcrush is built against a check that draws test scenes twice, once on the graphics card and once by a reference
+written from the game's own drawing routines, and compares every pixel; and it's compared in the game with the CPU
+renderer itself, side by side. Where the two have differed, Bitcrush was changed to the game's way, down to how the
+game adds up a triangle's edges in floating point. The few places it still can't match are listed under Requirements
+and limits.
 
 ## Settings
 
@@ -36,6 +54,8 @@ UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove ver
 - Bitcrush replaces the GPU plugin and 117 HD while it's on; only one renderer can run at a time.
 - The CPU renderer itself only draws 25 tiles out. Past that, Bitcrush carries the same look on to your draw distance.
 - Textures added in later game updates count as not solid until Bitcrush's list of solid textures is updated.
+- Faces you can see through blend within a few levels of colour of the game's: a graphics card rounds a blend its own
+  way.
 - Sailing's boats are drawn wherever the fast path runs (OpenGL 4.3 compute shaders), rocking and all, through the
   game's own arithmetic for them. Without compute shaders, and on macOS, Bitcrush falls back to RuneLite's older way
   of handing a renderer the scene, which never passes a boat on, so there boats (and whoever is on them) are
@@ -43,17 +63,25 @@ UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove ver
 
 ## Credits
 
-Made by ghillie.wiki. Built on RuneLite's GPU plugin as it was in RuneLite 1.11.26 (BSD 2-Clause; its copyright
+Made by ghillie.wiki. Bitcrush is a third-party plugin, not made or endorsed by Jagex or RuneLite. Built on RuneLite's GPU plugin as it was in RuneLite 1.11.26 (BSD 2-Clause; its copyright
 notices are kept in each file it came from). The CPU renderer's behaviour is written fresh for Bitcrush from what the
 game draws, not copied from the game.
 
 ## For the Plugin Hub's review
 
+Checked against the Plugin Hub's README, RuneLite's Rejected or Rolled Back Features (including its forbidden language
+features and sensitive and restricted APIs) and Jagex's third-party client guidelines:
+
+- It draws the game's own presentation and changes no in-game content or assets, gives no combat or boss aid, adds or
+  changes no menu entries, moves or resizes no interface, and doesn't touch RuneLite's own UI or other plugins'
+  settings.
 - Java only. No reflection, JNI or JNA, java.io file access, network, other programs, `Thread.sleep`, or
   `Client.menuAction`.
 - The only files it reads are its own resources (the shaders, `solid-textures.txt`, the map regions), through
   `getResourceAsStream` from its own jar.
-- OpenGL and OpenCL through LWJGL, as RuneLite's GPU plugin does; both come with RuneLite's client.
+- OpenGL and OpenCL through LWJGL, as RuneLite's GPU plugin does; both come with RuneLite's client. No dependencies
+  beyond the client and the template's own (Lombok, JUnit for tests). Its package is `wiki.ghillie.cpulook`.
+- It talks to no server and reads no player data beyond what the game hands a renderer.
 - It hides nothing the game hands a renderer, apart from what the GPU plugin's own Hide unrelated maps setting
   does.
 - `Build.java` is `DEVELOPER = false` here. The developer build of the same source has a few diagnostics for working

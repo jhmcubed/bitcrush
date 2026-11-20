@@ -99,9 +99,9 @@ import org.lwjgl.system.Configuration;
 
 @PluginDescriptor(
 	name = "Bitcrush",
-	description = "The GPU plugin's draw distance and frame rate, with every pixel drawn the way the game's CPU renderer draws it",
+	description = "Old School's own CPU renderer, true to the pixel, with the GPU plugin's draw distance and frame rate",
 	enabledByDefault = false,
-	tags = {"gpu", "cpu", "renderer", "draw distance", "fps", "pixels", "retro", "cpu look"},
+	tags = {"gpu", "cpu", "renderer", "software renderer", "07", "2007", "classic", "retro", "original", "draw distance", "fps", "pixels", "banding", "cpu look"},
 	conflicts = {"GPU", "117 HD"},
 	loadInSafeMode = false
 )

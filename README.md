@@ -9,9 +9,18 @@ smoothness and reach. The software renderer keeps it, but only 25 tiles out and 
 
 Bitcrush doesn't make you choose. It runs the software renderer's own arithmetic on your graphics card: every corner
 turned and rounded, every triangle's edges, colour and depth stepped row by row, every face drawn in the game's own
-order, the way the game's own drawing routines do it. The picture is the native renderer's, pixel for pixel, but
-for the few exceptions listed below. Around it you get what only a graphics card can give: the GPU plugin's draw distance, an unlocked frame rate, and fog at the
-far edge if you want it.
+order, the way the game's own drawing routines do it. The picture is the native renderer's, pixel for pixel, but for
+the few exceptions listed below. Around it you get what only a graphics card can give: the GPU plugin's draw distance,
+an unlocked frame rate, and fog at the far edge if you want it.
+
+## Getting started
+
+1. In RuneLite, open the configuration panel (the wrench in the side bar), press **Plugin Hub** at its bottom, search
+   for Bitcrush and press **Install**.
+2. Bitcrush installs switched off. Find it in the plugin list and switch it on. That switches the GPU plugin and
+   117 HD off, since only one renderer can run at a time; switching either of them back on switches Bitcrush off.
+3. That's all: out of the box it draws as the game's own renderer does, 50 tiles out, with the frame rate unlocked
+   (a target of 60). Its settings (the cog beside it) are below.
 
 ## Why
 
@@ -29,29 +38,39 @@ and limits.
 
 ## Settings
 
-**The CPU look** (each on by default; turning one off draws that part the GPU plugin's way):
+**The CPU look** (turning one of the first five off draws that part the GPU plugin's way):
 
-- **4-pixel bricks**: shading stepped in bricks of 4 pixels along each row, as the CPU renderer does.
-- **Banded lightness**: the light in the game's own steps, not smooth.
-- **8-pixel texture spans**: textures stepped every 8 pixels along each row.
-- **The CPU's depth test**: what's in front decided by the CPU renderer's own rule.
-- **Solid textures**: the textures the game marks solid keep their black pixels instead of showing holes.
+- **4-pixel bricks** (on): shading stepped in bricks of 4 pixels along each row, as the CPU renderer does.
+- **Banded lightness** (on): the light in the game's own steps, not smooth.
+- **8-pixel texture spans** (on): textures stepped every 8 pixels along each row.
+- **The CPU's depth test** (on): what's in front decided by the CPU renderer's own rule.
+- **Solid textures** (on): the textures the game marks solid keep their black pixels instead of showing holes.
+- **Players' own faces**: how a player's own faces (and most NPCs') cover each other.
+  - *As the CPU* (the default): the game's own way. Trousers cover boots that poke through them, but some items worn
+    on the back cover part of the torso, as they do in the CPU renderer and RuneLite's GPU plugins.
+  - *Nearest wins*: the torso stays whole, but boots poke through trousers.
+  - *Both fixed*: Bitcrush's own, not the game's look. The game's order for faces close together, the nearest face
+    for faces farther apart: at the default Band, trousers stay over boots and a log basket stays behind the torso.
+- **Band** (12): for Both fixed, how far behind the nearest face at a pixel, in game units, another of the model's
+  faces can be and still show by the game's order. Past it, the nearer face wins.
 
-**Like the GPU plugin**: Draw distance (up to 128 tiles), Fog depth (off by default: the CPU renderer stops in a hard
-edge; with fog, the far edge fades into the sky as the GPU plugin's does), Hide unrelated maps, Extended map loading,
-UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove vertex snapping.
+**Like the GPU plugin**: Draw distance (50 tiles, up to 128), Fog depth (off by default: the CPU renderer stops in a
+hard edge; with fog, the far edge fades into the sky as the GPU plugin's does), Hide unrelated maps, Extended map
+loading, UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove vertex snapping.
 
 **Diagnostics**:
 
-- **Log frame timings**: every five seconds, writes to RuneLite's log where a frame's time goes.
+- **Log frame timings**: every five seconds, writes to RuneLite's log where a frame's time goes, in lines starting
+  "CPU Look frame timings" (CPU Look was Bitcrush's working title).
 - **Set up triangles in compute** (on): the faster way to draw, where the graphics card has compute shaders. Off, the
   same pixels are drawn the older, slower way.
 
 ## Requirements and limits
 
 - The fastest path needs OpenGL 4.3 with compute shaders (most Windows and Linux graphics cards of the last decade).
-  Without them Bitcrush still draws the same picture, more slowly. On macOS it uses OpenCL, which hasn't been tested yet.
-- Bitcrush replaces the GPU plugin and 117 HD while it's on; only one renderer can run at a time.
+  Without them Bitcrush still draws the same picture, more slowly. On macOS it uses OpenCL, which hasn't been tested
+  yet.
+- Only one renderer runs at a time: Bitcrush, the GPU plugin or 117 HD.
 - The CPU renderer itself only draws 25 tiles out. Past that, Bitcrush carries the same look on to your draw distance.
 - Textures added in later game updates count as not solid until Bitcrush's list of solid textures is updated.
 - Faces you can see through blend within a few levels of colour of the game's: a graphics card rounds a blend its own
@@ -61,31 +80,13 @@ UI scaling mode, Compute shaders, Unlock FPS, Vsync mode, FPS target, Remove ver
   of handing a renderer the scene, which never passes a boat on, so there boats (and whoever is on them) are
   invisible, as they are with GPU (legacy).
 
+## Questions and problems
+
+Open an issue at https://github.com/jhmcubed/bitcrush/issues. For a picture that differs from the game's own renderer,
+a screenshot of each (Bitcrush on, then off with the GPU plugin off too) from the same spot helps most.
+
 ## Credits
 
-Made by ghillie.wiki. Bitcrush is a third-party plugin, not made or endorsed by Jagex or RuneLite. Built on RuneLite's GPU plugin as it was in RuneLite 1.11.26 (BSD 2-Clause; its copyright
-notices are kept in each file it came from). The CPU renderer's behaviour is written fresh for Bitcrush from what the
-game draws, not copied from the game.
-
-## For the Plugin Hub's review
-
-Checked against the Plugin Hub's README, RuneLite's Rejected or Rolled Back Features (including its forbidden language
-features and sensitive and restricted APIs) and Jagex's third-party client guidelines:
-
-- It draws the game's own presentation and changes no in-game content or assets, gives no combat or boss aid, adds or
-  changes no menu entries, moves or resizes no interface, and doesn't touch RuneLite's own UI or other plugins'
-  settings.
-- Java only. No reflection, JNI or JNA, java.io file access, network, other programs, `Thread.sleep`, or
-  `Client.menuAction`.
-- The only files it reads are its own resources (the shaders, `solid-textures.txt`, the map regions), through
-  `getResourceAsStream` from its own jar.
-- OpenGL and OpenCL through LWJGL, as RuneLite's GPU plugin does; both come with RuneLite's client. No dependencies
-  beyond the client and the template's own (Lombok, JUnit for tests). Its package is `wiki.ghillie.cpulook`.
-- It talks to no server and reads no player data beyond what the game hands a renderer.
-- It hides nothing the game hands a renderer, apart from what the GPU plugin's own Hide unrelated maps setting
-  does.
-- `Build.java` is `DEVELOPER = false` here. The developer build of the same source has a few diagnostics for working
-  on the renderer (a depth-buffer view, plain triangles, a face-bias view, a draw-order log, a re-sort into a rebuilt
-  draw order, an older ground test). In this build they are hidden from the settings and never read.
-- `solid-textures.txt`: which textures the game marks solid (texels of 0 drawn black, not left as holes), read from
-  the game once with the developer build, since RuneLite's API doesn't expose the flag.
+Made by ghillie.wiki. Bitcrush is a third-party plugin, not made or endorsed by Jagex or RuneLite. Built on RuneLite's
+GPU plugin as it was in RuneLite 1.11.26 (BSD 2-Clause; its copyright notices are kept in each file it came from). The
+CPU renderer's behaviour is written fresh for Bitcrush, not copied from the game.

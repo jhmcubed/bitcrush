@@ -85,7 +85,7 @@ public interface CpuLookConfig extends Config
 	@ConfigItem(
 		keyName = "cpuDepthTest",
 		name = "The CPU's depth test",
-		description = "Today's CPU renderer keeps a depth key for every pixel and draws a pixel only where it's nearer than what's there (claude/cpu-look.md, \"Read from today's client\"): the ground in front hides a log's sunk side and the trunks' bottoms, and a canopy's nearer faces cover its farther ones. Off: the game's order alone decides, which draws them over the ground in front.",
+		description = "Today's CPU renderer keeps a depth key for every pixel and draws a pixel only where it's nearer than what's there: the ground in front hides a log's sunk side and the trunks' bottoms, and a canopy's nearer faces cover its farther ones. Off: the game's order alone decides, which draws them over the ground in front.",
 		position = 4,
 		section = cpuLook
 	)
@@ -96,7 +96,7 @@ public interface CpuLookConfig extends Config
 
 	@ConfigSection(
 		name = "Diagnostics",
-		description = "Switches for finding where CPU Look differs from the CPU renderer. Off in normal use.",
+		description = "For measuring where a frame's time goes and comparing ways of drawing. Leave them as they are in normal use.",
 		position = 30,
 		closedByDefault = true
 	)
@@ -253,7 +253,7 @@ public interface CpuLookConfig extends Config
 	@ConfigItem(
 		keyName = "recordPath",
 		name = "Set up triangles in compute",
-		description = "The record path (stage A3): each triangle set up once, in the CPU's order, by a compute pass, and drawn from what it wrote. Off: the geometry stage sets them up, as before 11/18/2026. The same pixels either way (run.py check draws its scenes both ways); for comparing their frame timings.",
+		description = "Each triangle set up once, in the game's order, by a compute pass, and drawn from what it wrote: the faster way, where the graphics card has compute shaders. Off: each triangle is set up as it's drawn, more slowly. The same pixels either way.",
 		position = 43,
 		section = diagnostics
 	)

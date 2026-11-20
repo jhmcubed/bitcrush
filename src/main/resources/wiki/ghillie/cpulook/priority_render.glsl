@@ -257,8 +257,33 @@ void insert_face(uint localId, modelinfo minfo, int adjPrio, int distance, int p
 #ifdef SKIP_EMPTY
 uniform ivec2 viewSize;
 
-// the client's edges, and a flat face's line (cpu_edges.glsl)
-#include "cpu_edges.glsl"
+// the client's running sums (cpu_acc.glsl: only the usual run's quick way is used here)
+#include "cpu_acc.glsl"
+
+// A flat face whose rounded corners line up (the client's flat routine walks it; cpu_edges.glsl): certainly blank where,
+// with every corner on the screen's rows, its long edge added up to the middle corner's row lands exactly on the middle
+// corner's x, for from there the long edge and the middle-to-bottom edge are the same sums, as the top part's two edges
+// always are. One division and one quick sum (11/20/2026: the setup's walk of the bottom rows here, three divisions and
+// a loop in the lanes that took it, held up the big tiers: his 1024 x 4 0.45 to 0.59 ms). Anything else is kept, for
+// the setup's own walk to decide.
+bool flatLineSurelyBlank(int x0, int y0, int x1, int y1, int x2, int y2) {
+  if (min(y0, min(y1, y2)) < 0 || max(y0, max(y1, y2)) > viewSize.y) {
+    return false;
+  }
+  // the top, middle and bottom by row (rows alike: a level line, no rows, or a corner twice, the same start)
+  int t = y0 <= y1 && y0 <= y2 ? 0 : y1 <= y2 ? 1 : 2;
+  int b = t == 0 ? (y1 >= y2 ? 1 : 2) : t == 1 ? (y0 >= y2 ? 0 : 2) : (y0 >= y1 ? 0 : 1);
+  int m = 3 - t - b;
+  int xt = t == 0 ? x0 : t == 1 ? x1 : x2, yt = t == 0 ? y0 : t == 1 ? y1 : y2;
+  int xm = m == 0 ? x0 : m == 1 ? x1 : x2, ym = m == 0 ? y0 : m == 1 ? y1 : y2;
+  int xb = b == 0 ? x0 : b == 1 ? x1 : x2, yb = b == 0 ? y0 : b == 1 ? y1 : y2;
+  if (yb == yt || ym == yb) {
+    return true;  // no rows, or none in the bottom part
+  }
+  bool ok;
+  float v = cpu_acc_fast(float(xt), fdiv(float(xb - xt), float(yb - yt)), ym - yt, ok);
+  return ok && v == float(xm);
+}
 
 // A corner's screen point by the card's own division (not the setup's exact one, fdiv.glsl), and how far it may be
 // from the exact one: the card's quotient is within a few rounding steps of the true one (GLSL allows 2.5), here
@@ -322,8 +347,8 @@ bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam, bool flatFace) {
     return false;
   }
   int det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (det == 0 && (!flatFace || !flatLineDraws(x0, y0, x1, y1, x2, y2))) {
-    return true;  // (a flat face's line draws only where a row of its walk lights a pixel: cpu_edges.glsl)
+  if (det == 0 && (!flatFace || flatLineSurelyBlank(x0, y0, x1, y1, x2, y2))) {
+    return true;  // (a flat face's line may still light a pixel: kept for the setup's walk, cpu_edges.glsl)
   }
   int minX = max(0, min(x0, min(x1, x2)));
   int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));

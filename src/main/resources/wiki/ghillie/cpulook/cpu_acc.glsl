@@ -69,7 +69,10 @@ float cpu_acc_runs(float x, float s, int n) {
 // the step isn't a tie (half a unit of the binade left over, which rounds by parity), every further step inside the
 // binade adds the very same number of its units, so n of them that stay inside, a unit clear of its bottom, are one
 // multiplication, with no division and no loop. Anything else goes the general way.
-float cpu_acc(float x, float s, int n) {
+// (cpu_acc's usual run alone, for the compute pass's skip: ok false where it doesn't apply, and then x + s is returned,
+// one step taken)
+float cpu_acc_fast(float x, float s, int n, out bool ok) {
+  ok = true;
   if (n <= 0 || s == 0.0) {
     return x;
   }
@@ -92,7 +95,14 @@ float cpu_acc(float x, float s, int n) {
       }
     }
   }
-  return cpu_acc_runs(y, s, n - 1);
+  ok = false;
+  return y;
+}
+
+float cpu_acc(float x, float s, int n) {
+  bool ok;
+  float v = cpu_acc_fast(x, s, n, ok);
+  return ok ? v : cpu_acc_runs(v, s, n - 1);
 }
 
 // How far n additions of a step can end from one multiplication (g = x + s * n, Java's two roundings): each addition

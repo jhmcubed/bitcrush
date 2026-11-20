@@ -40,6 +40,9 @@ int idiv(int a, int b) {
 // Java's float division (correctly rounded), in floats: fdiv.glsl
 #include "fdiv.glsl"
 
+// the client's edges and its running sums (the walk), and a flat face's line (cpu_edges.glsl)
+#include "cpu_edges.glsl"
+
 // a corner as the client's Model.draw leaves it: turned (floats), its screen point (floats), its ints
 struct corner {
   vec3 cam;     // camera space, floats
@@ -150,6 +153,9 @@ bool coverage(vec2 f0, vec2 f1, vec2 f2, bool flatFace, out int x0, out int x1, 
   int maxY = min(viewSize.y, max(y0, max(y1, y2))) - 1;
   if (minX > maxX || minY > maxY) return false;
   box = ivec4(minX, minY, maxX + 1, maxY + 1);
+  // a flat face's line (its rounded corners in a line): something only where a row of its walk lights a pixel
+  // (11/20/2026: most light none, and zoomed out there are tens of thousands of them a frame)
+  if (det == 0 && !flatLineDraws(x0, y0, x1, y1, x2, y2)) return false;
   return true;
 }
 
@@ -181,36 +187,12 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   bool flatFace = (flags & 32) != 0;
   if (!coverage(f0, f1, f2, flatFace, x0, x1, x2, y0, y1, y2, det, box)) return false;
 
-  // the edges' slopes as the client's (fc.av and its kin, read 11/19/2026): float divisions of the rounded corners
-  // (fdiv.glsl: Java's), the same whichever way an edge is walked
-  float s01 = y0 != y1 ? fdiv(float(x1 - x0), float(y1 - y0)) : 0.0;
-  float s12 = y1 != y2 ? fdiv(float(x2 - x1), float(y2 - y1)) : 0.0;
-  float s02 = y0 != y2 ? fdiv(float(x2 - x0), float(y2 - y0)) : 0.0;
-
-  // the top corner (the least row), the middle one (the other two clamped to the screen's bottom first, as the client
-  // picks it), and which edge is on the left, by the client's own tests on those slopes
-  int H = viewSize.y;
+  // the edges: which corner is the top, the middle and the bottom, which edge is on the left, the slopes (cpu_edges.glsl)
   int t, m, b;
   bool longLeft;
-  if (y0 <= y1 && y0 <= y2) {
-    t = 0;
-    int c1 = min(y1, H), c2 = min(y2, H);
-    if (c1 < c2) { m = 1; b = 2; longLeft = !((y0 == c1 || !(s02 < s01)) && (y0 != c1 || !(s02 > s12))); }
-    else { m = 2; b = 1; longLeft = (y0 == c2 || !(s02 < s01)) && (y0 != c2 || !(s12 > s01)); }
-  } else if (y1 <= y2) {
-    t = 1;
-    int c2 = min(y2, H), c0 = min(y0, H);
-    if (c2 < c0) { m = 2; b = 0; longLeft = !((y1 == c2 || !(s01 < s12)) && (y1 != c2 || !(s01 > s02))); }
-    else { m = 0; b = 2; longLeft = !(s01 < s12); }
-  } else {
-    t = 2;
-    int c0 = min(y0, H), c1 = min(y1, H);
-    if (c0 < c1) { m = 0; b = 1; longLeft = s12 < s02; }
-    else { m = 1; b = 0; longLeft = !(s12 < s02); }
-  }
-  float sTB = (t + b) == 1 ? s01 : (t + b) == 3 ? s12 : s02;
-  float sTM = (t + m) == 1 ? s01 : (t + m) == 3 ? s12 : s02;
-  float sMB = (m + b) == 1 ? s01 : (m + b) == 3 ? s12 : s02;
+  float sTB, sTM, sMB;
+  triangleEdges(x0, y0, x1, y1, x2, y2, t, m, b, longLeft, sTB, sTM, sMB);
+  int H = viewSize.y;
   // the top, middle and bottom corners' values
   int xt = pick3(x0, x1, x2, t), xm = pick3(x0, x1, x2, m), yt = pick3(y0, y1, y2, t), ym = pick3(y0, y1, y2, m);
   int yb = pick3(y0, y1, y2, b), Ct = pick3(c0, c1, c2, t);

@@ -257,6 +257,9 @@ void insert_face(uint localId, modelinfo minfo, int adjPrio, int distance, int p
 #ifdef SKIP_EMPTY
 uniform ivec2 viewSize;
 
+// the client's edges, and a flat face's line (cpu_edges.glsl)
+#include "cpu_edges.glsl"
+
 // A corner's screen point by the card's own division (not the setup's exact one, fdiv.glsl), and how far it may be
 // from the exact one: the card's quotient is within a few rounding steps of the true one (GLSL allows 2.5), here
 // allowed a hundred, and the sum's rounding on top.
@@ -319,8 +322,8 @@ bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam, bool flatFace) {
     return false;
   }
   int det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (det == 0 && !flatFace) {
-    return true;  // (a flat face may still draw: setup.glsl's coverage)
+  if (det == 0 && (!flatFace || !flatLineDraws(x0, y0, x1, y1, x2, y2))) {
+    return true;  // (a flat face's line draws only where a row of its walk lights a pixel: cpu_edges.glsl)
   }
   int minX = max(0, min(x0, min(x1, x2)));
   int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));

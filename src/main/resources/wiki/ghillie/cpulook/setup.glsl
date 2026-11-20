@@ -99,7 +99,7 @@ void textureTerms(ivec3 p, ivec3 m, ivec3 n, bool tile, out ivec4 t0, out ivec4 
 // A triangle set up for the fragment stage: what the geometry stage hands each pixel (as flat varyings) or the record
 // path stores (setup_comp.glsl), and its box on the screen.
 struct Rec {
-  ivec4 rows;   // first row, middle row, bottom row (each clamped to the screen), flags (1 long edge on the left, 2 textured, 4/8 marks, 16 tile, texture << 8)
+  ivec4 rows;   // first row, middle row, bottom row (each clamped to the screen), flags (1 long edge on the left, 2 textured, 4/8 marks, 16 tile, 32 flat, texture << 8)
   ivec4 edge;   // floats' bits: the long edge's and the top-to-middle edge's x at the first row, their slopes
   ivec4 col;    // the middle-to-bottom edge's slope (a float's bits); textured faces' int shade where the first row meets x = 0, its step across, its step down
   vec4 colF;    // plain faces: the float palette index where the first row meets x = 0, its step across, its step down
@@ -123,7 +123,7 @@ struct Rec {
 // and so put every per-corner array in local memory, indexed at run time: 51 four-wide slots a thread in the count,
 // 68 in the write (their binaries from his card), the card's slow memory, and the count and write's time. Each corner
 // is now its own variables and the near cut's points four named slots; the very same arithmetic.)
-bool coverage(vec2 f0, vec2 f1, vec2 f2, out int x0, out int x1, out int x2, out int y0, out int y1, out int y2, out int det, out ivec4 box) {
+bool coverage(vec2 f0, vec2 f1, vec2 f2, bool flatFace, out int x0, out int x1, out int x2, out int y0, out int y1, out int y2, out int det, out ivec4 box) {
   precise float rx0 = f0.x + 0.5;
   precise float ry0 = f0.y + 0.5;
   precise float rx1 = f1.x + 0.5;
@@ -138,7 +138,9 @@ bool coverage(vec2 f0, vec2 f1, vec2 f2, out int x0, out int x1, out int x2, out
   y2 = int(ry2);
   box = ivec4(0);
   det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (det == 0) return false;  // no area once on whole pixels
+  // no area once on whole pixels: nothing drawn, but by the client's flat routine (fc.ay, a flat face's: 11/20/2026),
+  // which tests only the unrounded corners, so its rows may still leave a pixel here and there along the line
+  if (det == 0 && !flatFace) return false;
   // nor on the unrounded corners (the client's second test, before its depth key's steps: 11/19/2026)
   precise float kd = (f1.x - f0.x) * (f2.y - f0.y) - (f2.x - f0.x) * (f1.y - f0.y);
   if (kd == 0.0) return false;
@@ -164,10 +166,10 @@ vec2 pick3(vec2 a0, vec2 a1, vec2 a2, int i) {
   return i == 0 ? a0 : i == 1 ? a1 : a2;
 }
 
-bool covers(vec2 f0, vec2 f1, vec2 f2) {
+bool covers(vec2 f0, vec2 f1, vec2 f2, bool flatFace) {
   int x0, x1, x2, y0, y1, y2, det;
   ivec4 box;
-  return coverage(f0, f1, f2, x0, x1, x2, y0, y1, y2, det, box);
+  return coverage(f0, f1, f2, flatFace, x0, x1, x2, y0, y1, y2, det, box);
 }
 
 // One triangle: f the screen corners as floats (unrounded), s their depth keys, c their colours (hsl, or a textured
@@ -176,7 +178,8 @@ bool covers(vec2 f0, vec2 f1, vec2 f2) {
 bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, float s1, float s2, vec3 zc, int flags, ivec4 t0, ivec4 t1, int t40, int alpha, int bias, out Rec r) {
   int x0, x1, x2, y0, y1, y2, det;
   ivec4 box;
-  if (!coverage(f0, f1, f2, x0, x1, x2, y0, y1, y2, det, box)) return false;
+  bool flatFace = (flags & 32) != 0;
+  if (!coverage(f0, f1, f2, flatFace, x0, x1, x2, y0, y1, y2, det, box)) return false;
 
   // the edges' slopes as the client's (fc.av and its kin, read 11/19/2026): float divisions of the rounded corners
   // (fdiv.glsl: Java's), the same whichever way an edge is walked
@@ -233,7 +236,8 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
     }
     col = ivec4(floatBitsToInt(sMB), seedI, gxI, gyI);
   } else {
-    float gx = fdiv(ax, fdet), gy = fdiv(ay, fdet);
+    // (a flat face: one colour, no steps; its rounded corners may line up, det 0)
+    float gx = flatFace ? 0.0 : fdiv(ax, fdet), gy = flatFace ? 0.0 : fdiv(ay, fdet);
     precise float seed = float(Ct) - gx * float(xt) + gx;
     if (yt < 0) {
       seed -= gy * float(yt);
@@ -277,7 +281,7 @@ bool setupTriangle(vec2 f0, vec2 f1, vec2 f2, int c0, int c1, int c2, float s0, 
   vec3 iz = vec3(1.0 / max(zc.x, 1.0), 1.0 / max(zc.y, 1.0), 1.0 / max(zc.z, 1.0));
   float dax = float(x1 - x0), day = float(y1 - y0), dbx = float(x2 - x0), dby = float(y2 - y0);
   float ad = iz.y - iz.x, bd = iz.z - iz.x;
-  float dA = (ad * dby - bd * day) / fdet, dB = (bd * dax - ad * dbx) / fdet;
+  float dA = det != 0 ? (ad * dby - bd * day) / fdet : 0.0, dB = det != 0 ? (bd * dax - ad * dbx) / fdet : 0.0;
   vec4 depth = vec4(dA, dB, iz.x - dA * float(x0) - dB * float(y0), eM);  // w: the middle-to-bottom edge's start
 
   r.rows = rows;
@@ -362,6 +366,7 @@ int setupFace(vec3 v0, vec3 v1, vec3 v2, int a0, int a1, int a2, int texPlus1, i
     flags = 2 | (texId << 8);
   }
   flags |= ((a0 >> 20) & 12) | (tile ? 16 : 0);  // 4 the ground, 8 never hidden by it, 16 a ground tile
+  flags |= (a0 & 0x10000) != 0 && (flags & 2) == 0 ? 32 : 0;  // 32 a flat face (the client's flat routine)
 
   bool in0 = k0.cam.z >= 50.0, in1 = k1.cam.z >= 50.0, in2 = k2.cam.z >= 50.0;
   float key0 = 0.0, key1 = 0.0, key2 = 0.0;
@@ -377,7 +382,7 @@ int setupFace(vec3 v0, vec3 v1, vec3 v2, int a0, int a1, int a2, int texPlus1, i
     // the client's test for a face turned away, on its float screen corners
     precise float facing = (k0.screen.x - k1.screen.x) * (k2.screen.y - k1.screen.y) - (k2.screen.x - k1.screen.x) * (k0.screen.y - k1.screen.y);
     if (!(facing > 0.0)) return 0;
-    if (!full) return covers(k0.screen, k1.screen, k2.screen) ? 1 : 0;
+    if (!full) return covers(k0.screen, k1.screen, k2.screen, (flags & 32) != 0) ? 1 : 0;
     return setupTriangle(k0.screen, k1.screen, k2.screen, col0, col1, col2, key0, key1, key2, vec3(k0.cam.z, k1.cam.z, k2.cam.z), flags, t0, t1, t40, alpha, bias, r0) ? 1 : 0;
   }
   if (!in0 && !in1 && !in2) return 0;
@@ -435,7 +440,7 @@ int setupFace(vec3 v0, vec3 v1, vec3 v2, int a0, int a1, int a2, int texPlus1, i
   }
   // the two triangles in the order the client draws them; whichever of them has something to draw, in that order
   if (!full) {
-    return (n >= 3 && covers(q0.sp, q1.sp, q2.sp) ? 1 : 0) + (n == 4 && covers(q0.sp, q2.sp, q3.sp) ? 1 : 0);
+    return (n >= 3 && covers(q0.sp, q1.sp, q2.sp, (flags & 32) != 0) ? 1 : 0) + (n == 4 && covers(q0.sp, q2.sp, q3.sp, (flags & 32) != 0) ? 1 : 0);
   }
   int count = 0;
   if (n >= 3 && setupTriangle(q0.sp, q1.sp, q2.sp, q0.sc, q1.sc, q2.sc, q0.sk, q1.sk, q2.sk, vec3(q0.sz, q1.sz, q2.sz), flags, t0, t1, t40, alpha, bias, r0)) {

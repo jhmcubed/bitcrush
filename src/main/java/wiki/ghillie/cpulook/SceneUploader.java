@@ -549,7 +549,10 @@ class SceneUploader
 				}
 			}
 
-			int packAlphaPriority = packAlphaPriority(modelTransparency, transparencies, facePriorities, face);
+			// a flat face the client draws by its flat routine (fc.ay), which skips a triangle only when its unrounded
+			// corners make none: marked for the compute pass (bit 20, free in its input), which marks it 0x10000
+			int packAlphaPriority = packAlphaPriority(modelTransparency, transparencies, facePriorities, face)
+				| (flat && (faceTextures == null || faceTextures[face] == -1) ? 0x100000 : 0);
 			final int biasBits = bias(faceBias, face) << 9;
 
 			int triangleA = indices1[face];
@@ -1239,6 +1242,8 @@ class SceneUploader
 		int color2 = faceColors2[face];
 		int color3 = faceColors3[face];
 
+		// a flat face the client draws by its flat routine (fc.ay): marked 0x10000 for the setup (setup.glsl)
+		final int flatMark = color3 == -1 && (faceTextures == null || faceTextures[face] == -1) ? 0x10000 : 0;
 		if (color3 == -1)
 		{
 			color2 = color3 = color1;
@@ -1255,9 +1260,9 @@ class SceneUploader
 			}
 		}
 
-		vertexBuffer.put(modelLocalX[triangleA], modelLocalY[triangleA], modelLocalZ[triangleA], packAlphaPriority | color1);
-		vertexBuffer.put(modelLocalX[triangleB], modelLocalY[triangleB], modelLocalZ[triangleB], packAlphaPriority | color2);
-		vertexBuffer.put(modelLocalX[triangleC], modelLocalY[triangleC], modelLocalZ[triangleC], packAlphaPriority | color3);
+		vertexBuffer.put(modelLocalX[triangleA], modelLocalY[triangleA], modelLocalZ[triangleA], packAlphaPriority | flatMark | color1);
+		vertexBuffer.put(modelLocalX[triangleB], modelLocalY[triangleB], modelLocalZ[triangleB], packAlphaPriority | flatMark | color2);
+		vertexBuffer.put(modelLocalX[triangleC], modelLocalY[triangleC], modelLocalZ[triangleC], packAlphaPriority | flatMark | color3);
 
 		if (faceTextures != null && faceTextures[face] != -1)
 		{

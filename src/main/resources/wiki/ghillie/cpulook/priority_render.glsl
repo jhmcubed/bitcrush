@@ -294,7 +294,7 @@ bool roundsSurely(float f, float margin, out int v) {
 // only the screen points differ, by the card's division, and the margins cover that many times over: a face is
 // never skipped that the setup (setup.glsl's setupFace) would draw (ShaderCheck's skip check). Faces across the near
 // plane are left to the setup.
-bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam) {
+bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam, bool flatFace) {
   vec3 k0 = cam ? a : cpu_turn(a), k1 = cam ? b : cpu_turn(b), k2 = cam ? c : cpu_turn(c);
   if (!(k0.z >= 50.0 && k1.z >= 50.0 && k2.z >= 50.0)) {
     return false;
@@ -319,8 +319,8 @@ bool surelyEmpty(vec3 a, vec3 b, vec3 c, bool cam) {
     return false;
   }
   int det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (det == 0) {
-    return true;
+  if (det == 0 && !flatFace) {
+    return true;  // (a flat face may still draw: setup.glsl's coverage)
   }
   int minX = max(0, min(x0, min(x1, x2)));
   int maxX = min(viewSize.x - 1, max(x0, max(x1, x2)));
@@ -506,13 +506,15 @@ void write_face(uint localId, modelinfo minfo, int myOffset) {
       // (11/19/2026: the zeros were 48 bytes a face of the card's memory traffic, written here and read back)
       | (toffset < 0 ? 0x20000 : 0);
     // (the face's bias rides on in its texture slot, uv.x's bits 9-16: SceneUploader.pushModel)
+    // a flat face for the client's flat routine (marked bit 20 at upload): 0x10000 for the setup
+    mark |= (thisrvA.ahsl & 0x100000) != 0 ? 0x10000 : 0;
     thisrvA.ahsl &= ~0xff0000;
     thisrvB.ahsl &= ~0xff0000;
     thisrvC.ahsl &= ~0xff0000;
 
 #ifdef SKIP_EMPTY
     // a face that surely draws nothing (fully see-through, or surelyEmpty): only the mark that says so
-    if (((thisrvA.ahsl >> 24) & 0xff) == 255 || surelyEmpty(vertA.xyz, vertB.xyz, vertC.xyz, cam)) {
+    if (((thisrvA.ahsl >> 24) & 0xff) == 255 || surelyEmpty(vertA.xyz, vertB.xyz, vertC.xyz, cam, (mark & 0x10000) != 0)) {
       vout[outOffset + myOffset * 3].ahsl = int(0xff000000u);
       return;
     }
